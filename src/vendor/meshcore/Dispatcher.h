@@ -2,7 +2,7 @@
 
 #include <MeshCore.h>
 #include <Identity.h>
-#include <Packet.h>
+#include "Packet.h"
 #include <Utils.h>
 #include <string.h>
 
