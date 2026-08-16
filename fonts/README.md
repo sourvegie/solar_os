@@ -64,7 +64,8 @@ Defaults:
 
 - Sizes: `10, 12, 14, 16, 18, 20`
 - Styles: regular, bold, italic, bold italic
-- Glyphs: ASCII plus Latin-1 supplement, `0x20-0x7e` and `0xa0-0xff`
+- Glyphs: ASCII, Latin-1 supplement, and the modern Russian and Ukrainian
+  alphabets, including `Ё ё Є є І і Ї ї Ґ ґ`
 - Rendering: monochrome FreeType output, no antialiasing
 
 Useful options:

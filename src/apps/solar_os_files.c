@@ -673,15 +673,34 @@ static void files_clip(char *out, size_t out_len, const char *text, size_t width
         text = "";
     }
 
-    size_t copy = strlen(text);
-    if (copy > width) {
-        copy = width;
+    size_t used = 0;
+    size_t cells = 0;
+    const unsigned char *p = (const unsigned char *)text;
+    while (*p != '\0' && cells < width) {
+        size_t char_len = 1;
+        if ((p[0] & 0xe0U) == 0xc0U && p[1] != '\0' &&
+            (p[1] & 0xc0U) == 0x80U) {
+            char_len = 2;
+        } else if ((p[0] & 0xf0U) == 0xe0U && p[1] != '\0' && p[2] != '\0' &&
+                   (p[1] & 0xc0U) == 0x80U &&
+                   (p[2] & 0xc0U) == 0x80U) {
+            char_len = 3;
+        } else if ((p[0] & 0xf8U) == 0xf0U && p[1] != '\0' && p[2] != '\0' &&
+                   p[3] != '\0' &&
+                   (p[1] & 0xc0U) == 0x80U &&
+                   (p[2] & 0xc0U) == 0x80U &&
+                   (p[3] & 0xc0U) == 0x80U) {
+            char_len = 4;
+        }
+        if (used + char_len >= out_len) {
+            break;
+        }
+        memcpy(&out[used], p, char_len);
+        used += char_len;
+        p += char_len;
+        cells++;
     }
-    if (copy >= out_len) {
-        copy = out_len - 1U;
-    }
-    memcpy(out, text, copy);
-    out[copy] = '\0';
+    out[used] = '\0';
 }
 
 static void files_add_clipped(size_t row,
@@ -690,7 +709,7 @@ static void files_add_clipped(size_t row,
                               const char *text,
                               uint8_t attr)
 {
-    char buffer[SOLAR_OS_TERMINAL_MAX_COLS + 1];
+    char buffer[SOLAR_OS_TERMINAL_MAX_COLS * 4U + 1U];
     const size_t clipped_width = width < SOLAR_OS_TERMINAL_MAX_COLS ? width : SOLAR_OS_TERMINAL_MAX_COLS;
 
     if (width == 0) {

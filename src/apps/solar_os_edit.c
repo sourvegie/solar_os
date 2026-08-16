@@ -21,6 +21,7 @@
 #define EDITOR_PSRAM_BUFFER_CAPACITY (256 * 1024)
 #define EDITOR_INTERNAL_BUFFER_CAPACITY (32 * 1024)
 #define EDITOR_TAB_WIDTH 4
+#define EDITOR_RENDER_BYTES_MAX (SOLAR_OS_TERMINAL_MAX_COLS * 4U)
 
 typedef enum {
     EDITOR_MODE_TEXT = 0,
@@ -73,6 +74,97 @@ static bool editor_is_printable(char ch)
     const unsigned char value = (unsigned char)ch;
 
     return isprint(value) || value >= 0xa0;
+}
+
+static bool editor_utf8_continuation(char ch)
+{
+    return ((uint8_t)ch & 0xc0U) == 0x80U;
+}
+
+static size_t editor_utf8_decode(const char *text,
+                                 size_t len,
+                                 size_t offset,
+                                 uint32_t *codepoint)
+{
+    if (text == NULL || offset >= len || codepoint == NULL) {
+        return 0;
+    }
+
+    const uint8_t first = (uint8_t)text[offset];
+    if (first < 0x80U) {
+        *codepoint = first;
+        return 1;
+    }
+    if ((first & 0xe0U) == 0xc0U && offset + 1U < len &&
+        editor_utf8_continuation(text[offset + 1U])) {
+        *codepoint = ((uint32_t)(first & 0x1fU) << 6) |
+            ((uint8_t)text[offset + 1U] & 0x3fU);
+        return 2;
+    }
+    if ((first & 0xf0U) == 0xe0U && offset + 2U < len &&
+        editor_utf8_continuation(text[offset + 1U]) &&
+        editor_utf8_continuation(text[offset + 2U])) {
+        *codepoint = ((uint32_t)(first & 0x0fU) << 12) |
+            ((uint32_t)((uint8_t)text[offset + 1U] & 0x3fU) << 6) |
+            ((uint8_t)text[offset + 2U] & 0x3fU);
+        return 3;
+    }
+    if ((first & 0xf8U) == 0xf0U && offset + 3U < len &&
+        editor_utf8_continuation(text[offset + 1U]) &&
+        editor_utf8_continuation(text[offset + 2U]) &&
+        editor_utf8_continuation(text[offset + 3U])) {
+        *codepoint = ((uint32_t)(first & 0x07U) << 18) |
+            ((uint32_t)((uint8_t)text[offset + 1U] & 0x3fU) << 12) |
+            ((uint32_t)((uint8_t)text[offset + 2U] & 0x3fU) << 6) |
+            ((uint8_t)text[offset + 3U] & 0x3fU);
+        return 4;
+    }
+
+    *codepoint = '?';
+    return 1;
+}
+
+static size_t editor_utf8_next(const char *text, size_t len, size_t offset)
+{
+    uint32_t codepoint = 0;
+    const size_t consumed = editor_utf8_decode(text, len, offset, &codepoint);
+    return consumed > 0 ? offset + consumed : len;
+}
+
+static size_t editor_utf8_prev(const char *text, size_t offset)
+{
+    if (text == NULL || offset == 0) {
+        return 0;
+    }
+    offset--;
+    while (offset > 0 && editor_utf8_continuation(text[offset])) {
+        offset--;
+    }
+    return offset;
+}
+
+static size_t editor_utf8_column(const char *text, size_t start, size_t end)
+{
+    size_t column = 0;
+    size_t offset = start;
+    while (offset < end) {
+        offset = editor_utf8_next(text, end, offset);
+        column++;
+    }
+    return column;
+}
+
+static size_t editor_utf8_index_for_column(const char *text,
+                                           size_t start,
+                                           size_t end,
+                                           size_t column)
+{
+    size_t offset = start;
+    while (offset < end && column > 0) {
+        offset = editor_utf8_next(text, end, offset);
+        column--;
+    }
+    return offset;
 }
 
 static const char *editor_app_name(void)
@@ -140,7 +232,8 @@ static size_t editor_index_for_line(size_t line)
 
 static size_t editor_cursor_col(void)
 {
-    return editor.cursor - editor_line_start_for(editor.cursor);
+    const size_t start = editor_line_start_for(editor.cursor);
+    return editor_utf8_column(editor.buffer, start, editor.cursor);
 }
 
 static void editor_update_preferred_col(void)
@@ -294,7 +387,7 @@ static void editor_write_clipped(size_t row,
                                  size_t max_cols,
                                  uint8_t attr)
 {
-    char clipped[SOLAR_OS_TERMINAL_MAX_COLS + 1];
+    char clipped[EDITOR_RENDER_BYTES_MAX + 1U];
     const size_t cols = solar_os_tui_cols(&editor.tui);
     if (row >= solar_os_tui_rows(&editor.tui) || col >= cols || max_cols == 0) {
         return;
@@ -306,8 +399,26 @@ static void editor_write_clipped(size_t row,
         width :
         SOLAR_OS_TERMINAL_MAX_COLS;
 
-    strlcpy(clipped, text != NULL ? text : "", sizeof(clipped));
-    clipped[limit] = '\0';
+    const char *source = text != NULL ? text : "";
+    const size_t source_len = strlen(source);
+    size_t source_offset = 0;
+    size_t used = 0;
+    size_t cells = 0;
+    while (source_offset < source_len && cells < limit) {
+        uint32_t codepoint = 0;
+        const size_t char_len = editor_utf8_decode(source,
+                                                   source_len,
+                                                   source_offset,
+                                                   &codepoint);
+        if (char_len == 0 || used + char_len >= sizeof(clipped)) {
+            break;
+        }
+        memcpy(&clipped[used], &source[source_offset], char_len);
+        used += char_len;
+        source_offset += char_len;
+        cells++;
+    }
+    clipped[used] = '\0';
     (void)solar_os_tui_addstr(&editor.tui, row, col, clipped, attr);
 }
 
@@ -678,50 +789,63 @@ static void editor_render(solar_os_context_t *ctx)
         const size_t line_index = editor.top_line + row;
         const size_t start = editor_index_for_line(line_index);
         const size_t end = editor_line_end_for(start);
-        char line[SOLAR_OS_TERMINAL_MAX_COLS];
-        uint8_t styles[SOLAR_OS_TERMINAL_MAX_COLS];
+        uint8_t styles[EDITOR_RENDER_BYTES_MAX];
         size_t line_len = 0;
-        size_t visible_start = start + editor.left_col;
-        size_t copy_len = 0;
+        size_t visible_start = start;
+        size_t visible_end = start;
+        size_t visible_len = 0;
 
         if (start < editor.len || line_index == 0) {
             line_len = end >= start ? end - start : 0;
-            if (editor.left_col < line_len) {
-                copy_len = line_len - editor.left_col;
-                if (copy_len > cols) {
-                    copy_len = cols;
-                }
-                if (copy_len > SOLAR_OS_TERMINAL_MAX_COLS) {
-                    copy_len = SOLAR_OS_TERMINAL_MAX_COLS;
-                }
-                visible_start = start + editor.left_col;
-                memcpy(line, &editor.buffer[visible_start], copy_len);
+            visible_start = editor_utf8_index_for_column(editor.buffer,
+                                                         start,
+                                                         end,
+                                                         editor.left_col);
+            visible_end = visible_start;
+            size_t visible_cells = 0;
+            while (visible_end < end && visible_cells < cols) {
+                visible_end = editor_utf8_next(editor.buffer, end, visible_end);
+                visible_cells++;
             }
+            visible_len = visible_end - visible_start;
         }
         if (editor.syntax != SOLAR_OS_SYNTAX_NONE && (start < editor.len || line_index == 0)) {
             solar_os_syntax_highlight_line(editor.syntax,
                                            &syntax_state,
                                            &editor.buffer[start],
                                            line_len,
-                                           editor.left_col,
+                                           visible_start - start,
                                            styles,
-                                           copy_len);
-        } else if (copy_len > 0) {
-            memset(styles, SOLAR_OS_SYNTAX_STYLE_NORMAL, copy_len);
+                                           visible_len);
+        } else if (visible_len > 0) {
+            memset(styles, SOLAR_OS_SYNTAX_STYLE_NORMAL, visible_len);
         }
 
-        for (size_t col = 0; col < copy_len; col++) {
-            const size_t index = visible_start + col;
+        size_t byte_offset = 0;
+        size_t screen_col = 0;
+        while (byte_offset < visible_len && screen_col < cols) {
+            const size_t index = visible_start + byte_offset;
             const bool selected = has_selection && index >= selection_start && index < selection_end;
-            const solar_os_syntax_style_t style = (solar_os_syntax_style_t)styles[col];
-            const uint32_t codepoint = editor_is_printable(line[col]) ?
-                (uint8_t)line[col] :
-                (uint32_t)'.';
+            const solar_os_syntax_style_t style =
+                (solar_os_syntax_style_t)styles[byte_offset];
+            uint32_t codepoint = 0;
+            const size_t consumed = editor_utf8_decode(editor.buffer,
+                                                       visible_end,
+                                                       index,
+                                                       &codepoint);
+            if (consumed == 0) {
+                break;
+            }
+            if (codepoint < 0x20U) {
+                codepoint = '.';
+            }
             (void)solar_os_tui_putch(&editor.tui,
                                      row + 1,
-                                     col,
+                                     screen_col,
                                      codepoint,
                                      editor_tui_attr(style, selected));
+            byte_offset += consumed;
+            screen_col++;
         }
     }
 
@@ -846,11 +970,13 @@ static void editor_backspace(void)
         return;
     }
 
-    memmove(&editor.buffer[editor.cursor - 1],
+    const size_t previous = editor_utf8_prev(editor.buffer, editor.cursor);
+    const size_t removed = editor.cursor - previous;
+    memmove(&editor.buffer[previous],
             &editor.buffer[editor.cursor],
             editor.len - editor.cursor);
-    editor.cursor--;
-    editor.len--;
+    editor.cursor = previous;
+    editor.len -= removed;
     editor.buffer[editor.len] = '\0';
     editor.dirty = true;
     editor_update_cursor_column();
@@ -866,7 +992,8 @@ static void editor_delete_forward(void)
         return;
     }
 
-    editor_delete_range(editor.cursor, editor.cursor + 1);
+    editor_delete_range(editor.cursor,
+                        editor_utf8_next(editor.buffer, editor.len, editor.cursor));
 }
 
 static bool editor_hex_append_byte(void)
@@ -973,7 +1100,7 @@ static void editor_hex_write_byte(uint8_t value)
 static void editor_move_left(void)
 {
     if (editor.cursor > 0) {
-        editor.cursor--;
+        editor.cursor = editor_utf8_prev(editor.buffer, editor.cursor);
         editor_update_preferred_col();
     }
 }
@@ -981,7 +1108,7 @@ static void editor_move_left(void)
 static void editor_move_right(void)
 {
     if (editor.cursor < editor.len) {
-        editor.cursor++;
+        editor.cursor = editor_utf8_next(editor.buffer, editor.len, editor.cursor);
         editor_update_preferred_col();
     }
 }
@@ -1019,13 +1146,14 @@ static bool editor_is_word_char(char ch)
 
 static void editor_move_word_left(void)
 {
-    size_t cursor = editor.cursor;
+    size_t cursor = editor.cursor > 0 ?
+        editor_utf8_prev(editor.buffer, editor.cursor) : 0;
 
-    while (cursor > 0 && !editor_is_word_char(editor.buffer[cursor - 1])) {
-        cursor--;
+    while (cursor > 0 && !editor_is_word_char(editor.buffer[cursor])) {
+        cursor = editor_utf8_prev(editor.buffer, cursor);
     }
     while (cursor > 0 && editor_is_word_char(editor.buffer[cursor - 1])) {
-        cursor--;
+        cursor = editor_utf8_prev(editor.buffer, cursor);
     }
 
     editor.cursor = cursor;
@@ -1037,10 +1165,10 @@ static void editor_move_word_right(void)
     size_t cursor = editor.cursor;
 
     while (cursor < editor.len && editor_is_word_char(editor.buffer[cursor])) {
-        cursor++;
+        cursor = editor_utf8_next(editor.buffer, editor.len, cursor);
     }
     while (cursor < editor.len && !editor_is_word_char(editor.buffer[cursor])) {
-        cursor++;
+        cursor = editor_utf8_next(editor.buffer, editor.len, cursor);
     }
 
     editor.cursor = cursor;
@@ -1056,9 +1184,15 @@ static void editor_move_up(void)
 
     const size_t previous_end = start - 1;
     const size_t previous_start = editor_line_start_for(previous_end);
-    const size_t previous_len = previous_end - previous_start;
-    const size_t col = editor.preferred_col < previous_len ? editor.preferred_col : previous_len;
-    editor.cursor = previous_start + col;
+    const size_t previous_cols = editor_utf8_column(editor.buffer,
+                                                    previous_start,
+                                                    previous_end);
+    const size_t col = editor.preferred_col < previous_cols ?
+        editor.preferred_col : previous_cols;
+    editor.cursor = editor_utf8_index_for_column(editor.buffer,
+                                                 previous_start,
+                                                 previous_end,
+                                                 col);
 }
 
 static void editor_move_down(void)
@@ -1071,9 +1205,13 @@ static void editor_move_down(void)
 
     const size_t next_start = end + 1;
     const size_t next_end = editor_line_end_for(next_start);
-    const size_t next_len = next_end - next_start;
-    const size_t col = editor.preferred_col < next_len ? editor.preferred_col : next_len;
-    editor.cursor = next_start + col;
+    const size_t next_cols = editor_utf8_column(editor.buffer, next_start, next_end);
+    const size_t col = editor.preferred_col < next_cols ?
+        editor.preferred_col : next_cols;
+    editor.cursor = editor_utf8_index_for_column(editor.buffer,
+                                                 next_start,
+                                                 next_end,
+                                                 col);
 }
 
 static void editor_page_up(void)

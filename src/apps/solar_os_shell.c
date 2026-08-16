@@ -3133,13 +3133,14 @@ static void shell_prompt(solar_os_context_t *ctx)
     shell_session(ctx)->prompt_on_resume = false;
     shell_session(ctx)->clear_on_resume = false;
 
+    if (solar_os_shell_io_cursor_col(io) != 0) {
+        solar_os_shell_io_newline(io);
+    }
+
     if (solar_os_context_take_status_message(ctx,
                                              status_message,
                                              sizeof(status_message)) &&
         status_message[0] != '\0') {
-        if (solar_os_shell_io_cursor_col(io) != 0) {
-            solar_os_shell_io_newline(io);
-        }
         solar_os_shell_io_writeln(io, status_message);
     }
 

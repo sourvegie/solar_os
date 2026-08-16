@@ -1,4 +1,5 @@
 #include "solar_os_tui.h"
+#include "solar_os_unicode.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -354,6 +355,18 @@ static esp_err_t tui_buffer_put_codepoint(solar_os_tui_t *tui, uint32_t codepoin
 {
     if (!tui_diff_active(tui)) {
         return ESP_ERR_INVALID_STATE;
+    }
+
+    if (codepoint >= 0x0300U && codepoint <= 0x036fU) {
+        if (tui->draw_col > 0 && tui->draw_row < tui->diff_rows) {
+            const size_t index = (size_t)tui->draw_row * tui->diff_cols + tui->draw_col - 1U;
+            const uint32_t composed = solar_os_unicode_compose(tui->front_codepoints[index],
+                                                                codepoint);
+            if (composed != 0) {
+                tui->front_codepoints[index] = composed;
+            }
+        }
+        return ESP_OK;
     }
 
     if (codepoint == '\r') {

@@ -25,7 +25,18 @@ from PIL import Image, ImageDraw, ImageFont
 
 FONT_DIR = Path(__file__).resolve().parent
 DEFAULT_SIZES = [10, 12, 14, 16, 18, 20]
-DEFAULT_RANGES = [(0x20, 0x7E), (0xA0, 0xFF)]
+DEFAULT_RANGES = [
+    (0x20, 0x7E),
+    (0xA0, 0xFF),
+    (0x0401, 0x0401),  # Ё
+    (0x0404, 0x0404),  # Є
+    (0x0406, 0x0407),  # І Ї
+    (0x0410, 0x044F),  # А-Я а-я
+    (0x0451, 0x0451),  # ё
+    (0x0454, 0x0454),  # є
+    (0x0456, 0x0457),  # і ї
+    (0x0490, 0x0491),  # Ґ ґ
+]
 
 
 @dataclass(frozen=True)
@@ -295,6 +306,8 @@ def draw_preview(
         "The quick brown fox jumps over the lazy dog.",
         "0123456789 []{} <> ~/ .ssh shell> setterm",
         "äöü ÄÖÜ ß éèê ñ ø å",
+        "Съешь ещё этих мягких французских булок.",
+        "Українська: Є є І і Ї ї Ґ ґ.",
     ]
     rows = []
     max_width = 1
@@ -465,7 +478,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--glyph-ranges",
         type=parse_ranges,
         default=DEFAULT_RANGES,
-        help="comma-separated codepoint ranges, default: 0x20-0x7e,0xa0-0xff",
+        help="comma-separated codepoint ranges, default: Latin-1 plus modern Russian and Ukrainian",
     )
     parser.add_argument(
         "--threshold",

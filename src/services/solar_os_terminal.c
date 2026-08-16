@@ -1,4 +1,5 @@
 #include "solar_os_terminal_internal.h"
+#include "solar_os_unicode.h"
 
 #include <ctype.h>
 #include <stdarg.h>
@@ -1105,6 +1106,18 @@ void solar_os_terminal_backspace(solar_os_terminal_t *terminal)
 void solar_os_terminal_put_codepoint(solar_os_terminal_t *terminal, uint32_t codepoint)
 {
     if (terminal == NULL) {
+        return;
+    }
+    if (terminal_is_combining_codepoint(codepoint)) {
+        if (terminal->cursor_col > 0) {
+            solar_os_terminal_cell_t *line = terminal->lines[terminal->cursor_row];
+            const size_t previous_col = terminal->cursor_col - 1U;
+            const uint32_t composed = solar_os_unicode_compose(line[previous_col], codepoint);
+            if (composed != 0) {
+                line[previous_col] = (solar_os_terminal_cell_t)composed;
+                solar_os_terminal_mark_dirty(terminal);
+            }
+        }
         return;
     }
     const solar_os_terminal_cell_t cell = terminal_cell_for_codepoint(codepoint);

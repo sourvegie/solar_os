@@ -346,7 +346,7 @@ esp_err_t solar_os_shell_io_write_len(solar_os_shell_io_t *io, const char *text,
 
     if (io->kind == SOLAR_OS_SHELL_IO_KIND_TERMINAL) {
         for (size_t i = 0; i < len; i++) {
-            solar_os_terminal_put_char(io->terminal, text[i]);
+            solar_os_terminal_put_utf8_byte(io->terminal, (uint8_t)text[i]);
         }
         io->cursor_row = solar_os_terminal_cursor_row(io->terminal);
         io->cursor_col = solar_os_terminal_cursor_col(io->terminal);
@@ -376,7 +376,7 @@ esp_err_t solar_os_shell_io_write_raw(solar_os_shell_io_t *io, const char *data,
 
     if (io->kind == SOLAR_OS_SHELL_IO_KIND_TERMINAL) {
         for (size_t i = 0; i < len; i++) {
-            solar_os_terminal_put_char(io->terminal, data[i]);
+            solar_os_terminal_put_utf8_byte(io->terminal, (uint8_t)data[i]);
         }
         io->cursor_row = solar_os_terminal_cursor_row(io->terminal);
         io->cursor_col = solar_os_terminal_cursor_col(io->terminal);
@@ -547,13 +547,6 @@ esp_err_t solar_os_shell_io_write_bold(solar_os_shell_io_t *io, const char *text
 {
     if (io == NULL) {
         return ESP_ERR_INVALID_ARG;
-    }
-
-    if (io->kind == SOLAR_OS_SHELL_IO_KIND_TERMINAL) {
-        solar_os_terminal_write_bold(io->terminal, text);
-        io->cursor_row = solar_os_terminal_cursor_row(io->terminal);
-        io->cursor_col = solar_os_terminal_cursor_col(io->terminal);
-        return ESP_OK;
     }
 
     const bool previous = io->bold;
