@@ -32,6 +32,8 @@ typedef struct {
     bool battery_external_power;
     bool ble_connected;
     bool ble_scanning;
+    bool keyboard_layout_valid;
+    uint8_t keyboard_layout;
     bool wifi_started;
     bool wifi_connected;
     bool wifi_has_ip;

@@ -321,7 +321,7 @@ static bool setterm_tui_cycle_selected(int direction)
     static const char * const brightness_values[] = {"0", "25", "50", "75", "100"};
     static const char * const startup_values[] = {"flash", "sd"};
 #if SOLAR_OS_PACKAGE_SERVICE_BLE
-    static const char * const keyboard_values[] = {"us", "de"};
+    static const char * const keyboard_values[] = {"us", "de", "ru"};
 #endif
 
     switch ((setterm_tui_item_t)setterm_tui.selected) {

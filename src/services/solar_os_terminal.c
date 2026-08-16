@@ -9,6 +9,7 @@
 #include "solar_os_board.h"
 #include "solar_os_display.h"
 #include "solar_os_fonts.h"
+#include "solar_os_input.h"
 #include "solar_os_log.h"
 #include "solar_os_memory.h"
 #include "nvs.h"
@@ -1377,6 +1378,8 @@ static bool terminal_status_bar_equal(const solar_os_status_bar_t *a,
         a->battery_external_power == b->battery_external_power &&
         a->ble_connected == b->ble_connected &&
         a->ble_scanning == b->ble_scanning &&
+        a->keyboard_layout_valid == b->keyboard_layout_valid &&
+        a->keyboard_layout == b->keyboard_layout &&
         a->wifi_started == b->wifi_started &&
         a->wifi_connected == b->wifi_connected &&
         a->wifi_has_ip == b->wifi_has_ip &&
@@ -2525,6 +2528,19 @@ static bool terminal_status_icon_fits(int x, int icon_width, int right_limit)
     return x + icon_width <= right_limit;
 }
 
+static const char *terminal_status_keyboard_layout(const solar_os_status_bar_t *status)
+{
+    if (status == NULL || !status->keyboard_layout_valid) {
+        return "";
+    }
+    switch ((solar_os_input_keyboard_layout_t)status->keyboard_layout) {
+    case SOLAR_OS_INPUT_KEYBOARD_LAYOUT_US: return "US";
+    case SOLAR_OS_INPUT_KEYBOARD_LAYOUT_DE: return "DE";
+    case SOLAR_OS_INPUT_KEYBOARD_LAYOUT_RU: return "RU";
+    default: return "??";
+    }
+}
+
 static void terminal_draw_status_bar(solar_os_terminal_t *terminal, u8g2_t *u8g2)
 {
     const solar_os_status_bar_t *status = &terminal->status_bar;
@@ -2565,6 +2581,10 @@ static void terminal_draw_status_bar(solar_os_terminal_t *terminal, u8g2_t *u8g2
     const int leading_icon_right_limit = compact && inbox_width > 0
         ? icon_right_limit - inbox_width - TERM_STATUS_BAR_ICON_GAP
         : icon_right_limit;
+    const char *layout_text = terminal_status_keyboard_layout(status);
+    const int layout_width = layout_text[0] != '\0'
+        ? (int)u8g2_GetStrWidth(u8g2, layout_text)
+        : 0;
     int x = 4;
 
     if (!compact) {
@@ -2577,6 +2597,13 @@ static void terminal_draw_status_bar(solar_os_terminal_t *terminal, u8g2_t *u8g2
         x += 28;
         terminal_draw_keyboard_icon(u8g2, x, icon_y, status->ble_connected, status->ble_scanning);
         x += 26;
+        if (layout_width > 0) {
+            u8g2_DrawStr(u8g2,
+                         (u8g2_uint_t)x,
+                         (u8g2_uint_t)(height - 3),
+                         layout_text);
+            x += layout_width + 8;
+        }
         terminal_draw_wifi_icon(u8g2,
                                 x,
                                 icon_y,
@@ -2597,6 +2624,15 @@ static void terminal_draw_status_bar(solar_os_terminal_t *terminal, u8g2_t *u8g2
                     u8g2, x, icon_y, true, status->battery_percent);
             }
             x += 20 + TERM_STATUS_BAR_ICON_GAP;
+        }
+
+        if (layout_width > 0 &&
+            terminal_status_icon_fits(x, layout_width, leading_icon_right_limit)) {
+            u8g2_DrawStr(u8g2,
+                         (u8g2_uint_t)x,
+                         (u8g2_uint_t)(height - 3),
+                         layout_text);
+            x += layout_width + TERM_STATUS_BAR_ICON_GAP;
         }
 
         if ((status->ble_connected || status->ble_scanning) &&

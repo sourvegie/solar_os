@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "solar_os_keyboard_layout.h"
 
 #define SOLAR_OS_INPUT_SOURCE_INVALID 0U
 #define SOLAR_OS_INPUT_PHYSICAL_NONE 0U
@@ -35,11 +36,6 @@
 typedef uint8_t solar_os_input_source_t;
 
 typedef enum {
-    SOLAR_OS_INPUT_KEYBOARD_LAYOUT_US,
-    SOLAR_OS_INPUT_KEYBOARD_LAYOUT_DE,
-} solar_os_input_keyboard_layout_t;
-
-typedef enum {
     SOLAR_OS_INPUT_KEY_PRESS,
     SOLAR_OS_INPUT_KEY_RELEASE,
     SOLAR_OS_INPUT_KEY_REPEAT,
@@ -53,6 +49,8 @@ typedef struct {
     uint16_t usage;
     /* SolarOS logical key or translated character; zero is allowed. */
     uint8_t key;
+    /* Non-ASCII printable text, represented as a Unicode codepoint. */
+    uint32_t codepoint;
     uint8_t modifiers;
     solar_os_input_key_action_t action;
 } solar_os_input_key_event_t;
@@ -68,6 +66,19 @@ esp_err_t solar_os_input_write_key(solar_os_input_source_t source,
                                    uint8_t key,
                                    uint8_t modifiers,
                                    solar_os_input_key_action_t action);
+esp_err_t solar_os_input_write_key_codepoint(solar_os_input_source_t source,
+                                             uint16_t physical_key,
+                                             uint16_t usage,
+                                             uint8_t key,
+                                             uint32_t codepoint,
+                                             uint8_t modifiers,
+                                             solar_os_input_key_action_t action);
+esp_err_t solar_os_input_write_hid_key(solar_os_input_source_t source,
+                                       uint16_t physical_key,
+                                       uint16_t usage,
+                                       uint8_t modifiers,
+                                       bool caps_lock,
+                                       solar_os_input_key_action_t action);
 /* Compatibility helper for sources that can only provide a character tap. */
 esp_err_t solar_os_input_write_char(solar_os_input_source_t source, char ch);
 
@@ -80,13 +91,15 @@ size_t solar_os_input_get_pressed(solar_os_input_key_event_t *keys, size_t key_c
 
 solar_os_input_keyboard_layout_t solar_os_input_keyboard_layout(void);
 esp_err_t solar_os_input_set_keyboard_layout(solar_os_input_keyboard_layout_t layout);
+solar_os_input_keyboard_layout_t solar_os_input_toggle_keyboard_layout(void);
 const char *solar_os_input_keyboard_layout_name(solar_os_input_keyboard_layout_t layout);
 bool solar_os_input_parse_keyboard_layout(const char *name,
                                           solar_os_input_keyboard_layout_t *layout);
 /* Translate a canonical USB HID keyboard usage with the active keymap. */
-uint8_t solar_os_input_translate_hid_usage(uint16_t usage,
-                                           uint8_t modifiers,
-                                           bool caps_lock);
+solar_os_keyboard_translation_t solar_os_input_translate_hid_usage(uint16_t usage,
+                                                                   uint8_t modifiers,
+                                                                   bool caps_lock);
+size_t solar_os_input_encode_utf8(uint32_t codepoint, char output[4]);
 
 void solar_os_input_get_repeat(uint16_t *rate_cps, uint16_t *delay_ms);
 esp_err_t solar_os_input_set_repeat(uint16_t rate_cps, uint16_t delay_ms);

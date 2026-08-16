@@ -557,7 +557,7 @@ static const char * const setterm_statusbar_values[] = {"show", "hide"};
 static const char * const setterm_brightness_values[] = {"0", "25", "50", "75", "100"};
 static const char * const setterm_profile_values[] = {"vt100", "ansi", "dumb"};
 static const char * const setterm_charset_values[] = {"utf8", "ascii"};
-static const char * const setterm_keyboard_values[] = {"us", "de"};
+static const char * const setterm_keyboard_values[] = {"us", "de", "ru"};
 static const char * const setterm_keyrate_values[] = {"off"};
 static const char * const setterm_timezone_values[] = {"UTC", "Europe/Berlin"};
 static const char * const setterm_startup_values[] = {"flash", "sd"};
@@ -3193,6 +3193,55 @@ static bool shell_can_redraw_input(solar_os_context_t *ctx)
     return solar_os_shell_io_is_cursor_addressable(shell_io(ctx));
 }
 
+static bool shell_utf8_continuation(char ch)
+{
+    return ((uint8_t)ch & 0xc0U) == 0x80U;
+}
+
+static size_t shell_utf8_prev(const char *text, size_t offset)
+{
+    if (text == NULL || offset == 0) {
+        return 0;
+    }
+    offset--;
+    while (offset > 0 && shell_utf8_continuation(text[offset])) {
+        offset--;
+    }
+    return offset;
+}
+
+static size_t shell_utf8_next(const char *text, size_t len, size_t offset)
+{
+    if (text == NULL || offset >= len) {
+        return len;
+    }
+    offset++;
+    while (offset < len && shell_utf8_continuation(text[offset])) {
+        offset++;
+    }
+    return offset;
+}
+
+static size_t shell_utf8_count(const char *text, size_t start, size_t end)
+{
+    size_t count = 0;
+    for (size_t offset = start; text != NULL && offset < end; count++) {
+        offset = shell_utf8_next(text, end, offset);
+    }
+    return count;
+}
+
+static size_t shell_utf8_advance(const char *text,
+                                 size_t len,
+                                 size_t offset,
+                                 size_t count)
+{
+    while (offset < len && count-- > 0) {
+        offset = shell_utf8_next(text, len, offset);
+    }
+    return offset;
+}
+
 static void shell_dumb_backspace(solar_os_context_t *ctx)
 {
     solar_os_shell_io_t *io = shell_io(ctx);
@@ -3208,8 +3257,18 @@ static void shell_ensure_cursor_visible(solar_os_context_t *ctx)
 
     if (shell_session(ctx)->input_cursor < shell_session(ctx)->input_view_offset) {
         shell_session(ctx)->input_view_offset = shell_session(ctx)->input_cursor;
-    } else if (shell_session(ctx)->input_cursor >= shell_session(ctx)->input_view_offset + visible_cols) {
-        shell_session(ctx)->input_view_offset = shell_session(ctx)->input_cursor - visible_cols + 1;
+    } else {
+        size_t cursor_col = shell_utf8_count(shell_session(ctx)->input,
+                                             shell_session(ctx)->input_view_offset,
+                                             shell_session(ctx)->input_cursor);
+        while (cursor_col >= visible_cols &&
+               shell_session(ctx)->input_view_offset < shell_session(ctx)->input_cursor) {
+            shell_session(ctx)->input_view_offset =
+                shell_utf8_next(shell_session(ctx)->input,
+                                shell_session(ctx)->input_len,
+                                shell_session(ctx)->input_view_offset);
+            cursor_col--;
+        }
     }
 }
 
@@ -3223,12 +3282,17 @@ static void shell_render_input(solar_os_context_t *ctx)
     }
 
     shell_ensure_cursor_visible(ctx);
-    size_t cursor_col = shell_session(ctx)->input_cursor - shell_session(ctx)->input_view_offset;
+    size_t cursor_col = shell_utf8_count(shell_session(ctx)->input,
+                                         shell_session(ctx)->input_view_offset,
+                                         shell_session(ctx)->input_cursor);
     if (cursor_col >= visible_cols) {
         cursor_col = visible_cols - 1;
     }
-    const size_t remaining = shell_session(ctx)->input_len - shell_session(ctx)->input_view_offset;
-    const size_t visible_len = remaining < visible_cols ? remaining : visible_cols;
+    const size_t visible_end = shell_utf8_advance(shell_session(ctx)->input,
+                                                  shell_session(ctx)->input_len,
+                                                  shell_session(ctx)->input_view_offset,
+                                                  visible_cols);
+    const size_t visible_len = visible_end - shell_session(ctx)->input_view_offset;
     (void)solar_os_shell_io_redraw_line(io,
                                         shell_session(ctx)->input_row,
                                         shell_session(ctx)->input_col,
@@ -3277,7 +3341,8 @@ static void shell_move_cursor_left(solar_os_context_t *ctx)
         return;
     }
 
-    shell_session(ctx)->input_cursor--;
+    shell_session(ctx)->input_cursor =
+        shell_utf8_prev(shell_session(ctx)->input, shell_session(ctx)->input_cursor);
     shell_render_input(ctx);
 }
 
@@ -3290,7 +3355,10 @@ static void shell_move_cursor_right(solar_os_context_t *ctx)
         return;
     }
 
-    shell_session(ctx)->input_cursor++;
+    shell_session(ctx)->input_cursor =
+        shell_utf8_next(shell_session(ctx)->input,
+                        shell_session(ctx)->input_len,
+                        shell_session(ctx)->input_cursor);
     shell_render_input(ctx);
 }
 
@@ -3324,7 +3392,7 @@ static bool shell_word_char(char ch)
 {
     const unsigned char value = (unsigned char)ch;
 
-    return isalnum(value) || value >= 0xa0 || ch == '_' || ch == '-' || ch == '/' || ch == '.';
+    return isalnum(value) || value >= 0x80 || ch == '_' || ch == '-' || ch == '/' || ch == '.';
 }
 
 static void shell_move_cursor_word_left(solar_os_context_t *ctx)
@@ -3334,11 +3402,19 @@ static void shell_move_cursor_word_left(solar_os_context_t *ctx)
     }
     size_t cursor = shell_session(ctx)->input_cursor;
 
-    while (cursor > 0 && !shell_word_char(shell_session(ctx)->input[cursor - 1])) {
-        cursor--;
+    while (cursor > 0) {
+        const size_t previous = shell_utf8_prev(shell_session(ctx)->input, cursor);
+        if (shell_word_char(shell_session(ctx)->input[previous])) {
+            break;
+        }
+        cursor = previous;
     }
-    while (cursor > 0 && shell_word_char(shell_session(ctx)->input[cursor - 1])) {
-        cursor--;
+    while (cursor > 0) {
+        const size_t previous = shell_utf8_prev(shell_session(ctx)->input, cursor);
+        if (!shell_word_char(shell_session(ctx)->input[previous])) {
+            break;
+        }
+        cursor = previous;
     }
 
     if (cursor != shell_session(ctx)->input_cursor) {
@@ -3354,11 +3430,17 @@ static void shell_move_cursor_word_right(solar_os_context_t *ctx)
     }
     size_t cursor = shell_session(ctx)->input_cursor;
 
-    while (cursor < shell_session(ctx)->input_len && shell_word_char(shell_session(ctx)->input[cursor])) {
-        cursor++;
+    while (cursor < shell_session(ctx)->input_len &&
+           shell_word_char(shell_session(ctx)->input[cursor])) {
+        cursor = shell_utf8_next(shell_session(ctx)->input,
+                                 shell_session(ctx)->input_len,
+                                 cursor);
     }
-    while (cursor < shell_session(ctx)->input_len && !shell_word_char(shell_session(ctx)->input[cursor])) {
-        cursor++;
+    while (cursor < shell_session(ctx)->input_len &&
+           !shell_word_char(shell_session(ctx)->input[cursor])) {
+        cursor = shell_utf8_next(shell_session(ctx)->input,
+                                 shell_session(ctx)->input_len,
+                                 cursor);
     }
 
     if (cursor != shell_session(ctx)->input_cursor) {
@@ -3367,37 +3449,36 @@ static void shell_move_cursor_word_right(solar_os_context_t *ctx)
     }
 }
 
-static void shell_insert_char(solar_os_context_t *ctx, char ch)
+static void shell_insert_text(solar_os_context_t *ctx, const char *text, size_t text_len)
 {
-    if (shell_session(ctx)->input_len >= shell_max_input_len(ctx)) {
+    if (text == NULL || text_len == 0 ||
+        text_len > shell_max_input_len(ctx) - shell_session(ctx)->input_len) {
         return;
     }
     if (!shell_can_redraw_input(ctx)) {
         if (shell_session(ctx)->input_cursor != shell_session(ctx)->input_len) {
             return;
         }
-        shell_session(ctx)->input[shell_session(ctx)->input_cursor++] = ch;
-        shell_session(ctx)->input_len++;
+        memcpy(&shell_session(ctx)->input[shell_session(ctx)->input_cursor], text, text_len);
+        shell_session(ctx)->input_cursor += text_len;
+        shell_session(ctx)->input_len += text_len;
         shell_session(ctx)->input[shell_session(ctx)->input_len] = '\0';
-        solar_os_shell_io_put_char(shell_io(ctx), ch);
+        solar_os_shell_io_write_len(shell_io(ctx), text, text_len);
         return;
     }
 
-    const bool append = shell_session(ctx)->input_cursor == shell_session(ctx)->input_len;
-    const size_t previous_view_offset = shell_session(ctx)->input_view_offset;
-    memmove(&shell_session(ctx)->input[shell_session(ctx)->input_cursor + 1],
+    memmove(&shell_session(ctx)->input[shell_session(ctx)->input_cursor + text_len],
             &shell_session(ctx)->input[shell_session(ctx)->input_cursor],
             shell_session(ctx)->input_len - shell_session(ctx)->input_cursor + 1);
-    shell_session(ctx)->input[shell_session(ctx)->input_cursor++] = ch;
-    shell_session(ctx)->input_len++;
-    if (append) {
-        shell_ensure_cursor_visible(ctx);
-        if (shell_session(ctx)->input_view_offset == previous_view_offset) {
-            (void)solar_os_shell_io_put_char(shell_io(ctx), ch);
-            return;
-        }
-    }
+    memcpy(&shell_session(ctx)->input[shell_session(ctx)->input_cursor], text, text_len);
+    shell_session(ctx)->input_cursor += text_len;
+    shell_session(ctx)->input_len += text_len;
     shell_render_input(ctx);
+}
+
+static void shell_insert_char(solar_os_context_t *ctx, char ch)
+{
+    shell_insert_text(ctx, &ch, 1);
 }
 
 static void shell_backspace(solar_os_context_t *ctx)
@@ -3409,18 +3490,42 @@ static void shell_backspace(solar_os_context_t *ctx)
         if (shell_session(ctx)->input_cursor != shell_session(ctx)->input_len) {
             return;
         }
-        shell_session(ctx)->input_cursor--;
-        shell_session(ctx)->input_len--;
+        const size_t previous =
+            shell_utf8_prev(shell_session(ctx)->input, shell_session(ctx)->input_cursor);
+        const size_t removed = shell_session(ctx)->input_cursor - previous;
+        shell_session(ctx)->input_cursor = previous;
+        shell_session(ctx)->input_len -= removed;
         shell_session(ctx)->input[shell_session(ctx)->input_len] = '\0';
         shell_dumb_backspace(ctx);
         return;
     }
 
-    memmove(&shell_session(ctx)->input[shell_session(ctx)->input_cursor - 1],
+    const size_t previous =
+        shell_utf8_prev(shell_session(ctx)->input, shell_session(ctx)->input_cursor);
+    const size_t removed = shell_session(ctx)->input_cursor - previous;
+    memmove(&shell_session(ctx)->input[previous],
             &shell_session(ctx)->input[shell_session(ctx)->input_cursor],
             shell_session(ctx)->input_len - shell_session(ctx)->input_cursor + 1);
-    shell_session(ctx)->input_cursor--;
-    shell_session(ctx)->input_len--;
+    shell_session(ctx)->input_cursor = previous;
+    shell_session(ctx)->input_len -= removed;
+    shell_render_input(ctx);
+}
+
+static void shell_delete_forward(solar_os_context_t *ctx)
+{
+    if (!shell_can_redraw_input(ctx) ||
+        shell_session(ctx)->input_cursor >= shell_session(ctx)->input_len) {
+        return;
+    }
+
+    const size_t next = shell_utf8_next(shell_session(ctx)->input,
+                                        shell_session(ctx)->input_len,
+                                        shell_session(ctx)->input_cursor);
+    const size_t removed = next - shell_session(ctx)->input_cursor;
+    memmove(&shell_session(ctx)->input[shell_session(ctx)->input_cursor],
+            &shell_session(ctx)->input[next],
+            shell_session(ctx)->input_len - next + 1);
+    shell_session(ctx)->input_len -= removed;
     shell_render_input(ctx);
 }
 
@@ -8341,6 +8446,11 @@ static void shell_handle_char(solar_os_context_t *ctx, char ch)
             shell_backspace(ctx);
         }
         break;
+    case SOLAR_OS_KEY_DELETE:
+        shell_session(ctx)->history_browsing = false;
+        shell_session(ctx)->history_index = -1;
+        shell_delete_forward(ctx);
+        break;
     case '\t':
         shell_complete_command(ctx, repeated_tab);
         break;
@@ -8457,7 +8567,32 @@ bool solar_os_shell_session_event(solar_os_context_t *ctx,
         return true;
     }
 
-    if (event == NULL || event->type != SOLAR_OS_EVENT_CHAR) {
+    if (event == NULL) {
+        return false;
+    }
+
+    if (event->type == SOLAR_OS_EVENT_KEY) {
+        if (event->data.key.action == SOLAR_OS_INPUT_KEY_RELEASE) {
+            return true;
+        }
+        if (event->data.key.codepoint != 0) {
+            char encoded[4];
+            const size_t encoded_len =
+                solar_os_input_encode_utf8(event->data.key.codepoint, encoded);
+            shell_session(ctx)->history_browsing = false;
+            shell_session(ctx)->history_index = -1;
+            shell_insert_text(ctx, encoded, encoded_len);
+            return true;
+        }
+        if ((event->data.key.modifiers & SOLAR_OS_INPUT_MOD_LEFT_ALT) != 0 &&
+            event->data.key.key != SOLAR_OS_KEY_APP_EXIT) {
+            shell_handle_char(ctx, (char)SOLAR_OS_KEY_ALT_PREFIX);
+        }
+        shell_handle_char(ctx, (char)event->data.key.key);
+        return true;
+    }
+
+    if (event->type != SOLAR_OS_EVENT_CHAR) {
         return false;
     }
 
@@ -8557,7 +8692,7 @@ static void shell_title(solar_os_context_t *ctx, char *buffer, size_t buffer_len
 static const solar_os_app_t shell_app = {
     .name = "shell",
     .summary = "SolarOS command shell",
-    .flags = SOLAR_OS_APP_FLAG_RESUMABLE,
+    .flags = SOLAR_OS_APP_FLAG_RESUMABLE | SOLAR_OS_APP_FLAG_KEY_EVENTS,
     .start = shell_start,
     .resume = shell_resume,
     .stop = NULL,

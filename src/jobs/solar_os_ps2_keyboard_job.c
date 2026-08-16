@@ -169,15 +169,12 @@ static void ps2_keyboard_transition(const solar_os_ps2_key_transition_t *transit
         ps2_keyboard.caps_lock = !ps2_keyboard.caps_lock;
     }
 
-    const uint8_t key = solar_os_input_translate_hid_usage(transition->usage,
-                                                           ps2_keyboard.modifiers,
-                                                           ps2_keyboard.caps_lock);
-    const esp_err_t err = solar_os_input_write_key(
+    const esp_err_t err = solar_os_input_write_hid_key(
         ps2_keyboard.input_source,
         transition->usage,
         transition->usage,
-        key,
         ps2_keyboard.modifiers,
+        ps2_keyboard.caps_lock,
         transition->pressed ? SOLAR_OS_INPUT_KEY_PRESS : SOLAR_OS_INPUT_KEY_RELEASE);
     if (err == ESP_OK) {
         ps2_keyboard.transitions++;

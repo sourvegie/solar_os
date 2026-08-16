@@ -900,6 +900,14 @@ static void dispatch_input_key(const solar_os_input_key_event_t *event)
     }
 
     solar_os_power_note_activity(millis_u32());
+    if (event->key == SOLAR_OS_KEY_KEYBOARD_LAYOUT_TOGGLE) {
+        if (event->action == SOLAR_OS_INPUT_KEY_PRESS) {
+            last_status_update_ms = 0;
+            update_status();
+            draw_terminal_if_needed();
+        }
+        return;
+    }
     if ((event->modifiers & SOLAR_OS_INPUT_MOD_ALT) != 0 &&
         (event->key == SOLAR_OS_KEY_RIGHT ||
          event->key == SOLAR_OS_KEY_LEFT)) {
@@ -913,7 +921,8 @@ static void dispatch_input_key(const solar_os_input_key_event_t *event)
         }
         return;
     }
-    if (event->action == SOLAR_OS_INPUT_KEY_RELEASE || event->key == 0) {
+    if (event->action == SOLAR_OS_INPUT_KEY_RELEASE ||
+        (event->key == 0 && event->codepoint == 0)) {
         if (input_focus_accepts_key_events()) {
             dispatch_key_to_input_focus(event);
         }
@@ -945,6 +954,13 @@ static void dispatch_input_key(const solar_os_input_key_event_t *event)
 
     if (input_focus_accepts_key_events()) {
         dispatch_key_to_input_focus(event);
+        return;
+    }
+
+    if (event->codepoint != 0) {
+        char encoded[4];
+        const size_t encoded_len = solar_os_input_encode_utf8(event->codepoint, encoded);
+        dispatch_input_chars(encoded, encoded_len);
         return;
     }
 
@@ -1036,6 +1052,8 @@ static void update_status(void)
     last_status_update_ms = now_ms;
 
     solar_os_status_bar_t status = {0};
+    status.keyboard_layout_valid = true;
+    status.keyboard_layout = (uint8_t)solar_os_input_keyboard_layout();
 
 #if SOLAR_OS_PACKAGE_SERVICE_INBOX
     solar_os_inbox_status_t inbox;

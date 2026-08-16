@@ -1796,11 +1796,36 @@ static bool editor_hex_event(solar_os_context_t *ctx, uint8_t key)
 
 static bool edit_event(solar_os_context_t *ctx, const solar_os_event_t *event)
 {
-    if (event == NULL || event->type != SOLAR_OS_EVENT_CHAR) {
+    if (event == NULL) {
         return false;
     }
 
-    const char ch = event->data.ch;
+    char ch = 0;
+    if (event->type == SOLAR_OS_EVENT_KEY) {
+        if (event->data.key.action == SOLAR_OS_INPUT_KEY_RELEASE) {
+            return true;
+        }
+        if (event->data.key.codepoint != 0) {
+            if (!editor.error_only && editor.mode != EDITOR_MODE_HEX) {
+                char encoded[4];
+                const size_t encoded_len =
+                    solar_os_input_encode_utf8(event->data.key.codepoint, encoded);
+                for (size_t i = 0; i < encoded_len; i++) {
+                    if (!editor_insert_char(encoded[i])) {
+                        break;
+                    }
+                }
+                editor_render(ctx);
+            }
+            return true;
+        }
+        ch = (char)event->data.key.key;
+    } else if (event->type == SOLAR_OS_EVENT_CHAR) {
+        ch = event->data.ch;
+    } else {
+        return false;
+    }
+
     if ((uint8_t)ch == SOLAR_OS_KEY_APP_EXIT) {
         solar_os_context_request_exit(ctx);
         return true;
@@ -1948,7 +1973,7 @@ static bool edit_event(solar_os_context_t *ctx, const solar_os_event_t *event)
 const solar_os_app_t solar_os_edit_app = {
     .name = "edit",
     .summary = "text editor",
-    .flags = SOLAR_OS_APP_FLAG_RESUMABLE,
+    .flags = SOLAR_OS_APP_FLAG_RESUMABLE | SOLAR_OS_APP_FLAG_KEY_EVENTS,
     .start = edit_start,
     .resume = edit_resume,
     .stop = edit_stop,

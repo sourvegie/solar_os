@@ -333,6 +333,7 @@ static esp_ble_scan_params_t scan_params = {
 static const char *keyboard_layout_names[] = {
     [SOLAR_OS_BLE_KEYBOARD_LAYOUT_US] = "us",
     [SOLAR_OS_BLE_KEYBOARD_LAYOUT_DE] = "de",
+    [SOLAR_OS_BLE_KEYBOARD_LAYOUT_RU] = "ru",
 };
 
 static const char *addr_type_name(esp_ble_addr_type_t addr_type);
@@ -2015,7 +2016,7 @@ static void keyboard_report_state_publish(uint8_t modifiers, const uint8_t *keys
             next.keycodes[i] = keys[i];
             next.chars[i] = solar_os_input_translate_hid_usage(keys[i],
                                                                modifiers,
-                                                               caps_lock);
+                                                               caps_lock).key;
         }
     }
 
@@ -2053,14 +2054,12 @@ static void handle_keyboard_report(uint8_t map_index,
         if (key == 0 || key_in_report(key, keys)) {
             continue;
         }
-        (void)solar_os_input_write_key(input_source,
-                                       key,
-                                       key,
-                                       solar_os_input_translate_hid_usage(key,
-                                                                          previous_modifiers,
-                                                                          caps_lock),
-                                       modifiers,
-                                       SOLAR_OS_INPUT_KEY_RELEASE);
+        (void)solar_os_input_write_hid_key(input_source,
+                                           key,
+                                           key,
+                                           previous_modifiers,
+                                           caps_lock,
+                                           SOLAR_OS_INPUT_KEY_RELEASE);
     }
 
     for (size_t i = 0; i < BLE_KEYBOARD_MAX_KEYS; i++) {
@@ -2073,17 +2072,15 @@ static void handle_keyboard_report(uint8_t map_index,
             caps_lock = !caps_lock;
         }
 
-        const uint8_t ch = solar_os_input_translate_hid_usage(key,
-                                                              modifiers,
-                                                              caps_lock);
-        (void)solar_os_input_write_key(input_source,
-                                       key,
-                                       key,
-                                       (uint8_t)ch,
-                                       modifiers,
-                                       SOLAR_OS_INPUT_KEY_PRESS);
+        (void)solar_os_input_write_hid_key(input_source,
+                                           key,
+                                           key,
+                                           modifiers,
+                                           caps_lock,
+                                           SOLAR_OS_INPUT_KEY_PRESS);
     }
 
+    keyboard_layout = (solar_os_ble_keyboard_layout_t)solar_os_input_keyboard_layout();
     keyboard_report_state_publish(modifiers, keys);
     memcpy(previous_keys, keys, sizeof(previous_keys));
     previous_modifiers = modifiers;

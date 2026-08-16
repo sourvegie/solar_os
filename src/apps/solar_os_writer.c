@@ -763,6 +763,70 @@ static void writer_begin_dialog(writer_dialog_t dialog, const char *initial)
     writer.render_pending = true;
 }
 
+static bool writer_utf8_continuation(char ch)
+{
+    return ((uint8_t)ch & 0xc0U) == 0x80U;
+}
+
+static size_t writer_utf8_prev_text(const char *text, size_t offset)
+{
+    if (text == NULL || offset == 0) {
+        return 0;
+    }
+    offset--;
+    while (offset > 0 && writer_utf8_continuation(text[offset])) {
+        offset--;
+    }
+    return offset;
+}
+
+static size_t writer_utf8_next_text(const char *text, size_t len, size_t offset)
+{
+    if (text == NULL || offset >= len) {
+        return len;
+    }
+    offset++;
+    while (offset < len && writer_utf8_continuation(text[offset])) {
+        offset++;
+    }
+    return offset;
+}
+
+static const char *writer_utf8_tail(const char *text, size_t max_chars)
+{
+    const size_t len = text != NULL ? strlen(text) : 0;
+    size_t start = 0;
+    size_t chars = 0;
+    for (size_t offset = 0; offset < len; chars++) {
+        offset = writer_utf8_next_text(text, len, offset);
+    }
+    while (chars > max_chars && start < len) {
+        start = writer_utf8_next_text(text, len, start);
+        chars--;
+    }
+    return text != NULL ? &text[start] : "";
+}
+
+static bool writer_dialog_accepts_text(void)
+{
+    return writer.dialog == WRITER_DIALOG_SAVE_AS ||
+        writer.dialog == WRITER_DIALOG_FIND ||
+        writer.dialog == WRITER_DIALOG_REPLACE_FIND ||
+        writer.dialog == WRITER_DIALOG_REPLACE_WITH;
+}
+
+static void writer_dialog_append(const char *text, size_t text_len)
+{
+    if (!writer_dialog_accepts_text() || text == NULL || text_len == 0 ||
+        text_len >= sizeof(writer.dialog_input) - writer.dialog_len) {
+        return;
+    }
+    memcpy(&writer.dialog_input[writer.dialog_len], text, text_len);
+    writer.dialog_len += text_len;
+    writer.dialog_input[writer.dialog_len] = '\0';
+    writer.render_pending = true;
+}
+
 static bool writer_find_from(const char *query, size_t *match_start)
 {
     const size_t query_len = strlen(query);
@@ -934,7 +998,9 @@ static bool writer_handle_dialog(solar_os_context_t *ctx, uint8_t ch)
     }
     if (ch == '\b' || ch == 0x7fU) {
         if (writer.dialog_len > 0) {
-            writer.dialog_input[--writer.dialog_len] = '\0';
+            writer.dialog_len = writer_utf8_prev_text(writer.dialog_input,
+                                                      writer.dialog_len);
+            writer.dialog_input[writer.dialog_len] = '\0';
         }
         writer.render_pending = true;
         return true;
@@ -970,10 +1036,9 @@ static bool writer_handle_dialog(solar_os_context_t *ctx, uint8_t ch)
         writer.render_pending = true;
         return true;
     }
-    if (ch >= 0x20U && ch < 0x80U && writer.dialog_len + 1U < sizeof(writer.dialog_input)) {
-        writer.dialog_input[writer.dialog_len++] = (char)ch;
-        writer.dialog_input[writer.dialog_len] = '\0';
-        writer.render_pending = true;
+    if (ch >= 0x20U && ch < 0x80U) {
+        const char text = (char)ch;
+        writer_dialog_append(&text, 1);
     }
     return true;
 }
@@ -1354,7 +1419,7 @@ static void writer_draw_dialog(solar_os_gfx_t *gfx)
         char input[WRITER_DIALOG_INPUT_MAX + 2U];
         snprintf(input, sizeof(input), "%s_", writer.dialog_input);
         const size_t max_chars = w > 14 ? (size_t)((w - 14) / 7) : 1U;
-        const char *visible = strlen(input) > max_chars ? &input[strlen(input) - max_chars] : input;
+        const char *visible = writer_utf8_tail(input, max_chars);
         solar_os_gfx_text(gfx, x + 5, y + 34, visible);
     }
 }
@@ -1526,6 +1591,24 @@ static bool writer_event(solar_os_context_t *ctx, const solar_os_event_t *event)
         writer_resume(ctx);
         return true;
     }
+    if (event->type == SOLAR_OS_EVENT_KEY) {
+        if (event->data.key.action == SOLAR_OS_INPUT_KEY_RELEASE) {
+            return true;
+        }
+        if (event->data.key.codepoint != 0) {
+            char encoded[4];
+            const size_t encoded_len =
+                solar_os_input_encode_utf8(event->data.key.codepoint, encoded);
+            writer_wake_cursor();
+            if (writer.dialog != WRITER_DIALOG_NONE) {
+                writer_dialog_append(encoded, encoded_len);
+            } else if (!writer.error_only) {
+                (void)writer_insert(encoded, encoded_len);
+            }
+            return true;
+        }
+        return writer_handle_char(ctx, event->data.key.key);
+    }
     if (event->type == SOLAR_OS_EVENT_CHAR) {
         return writer_handle_char(ctx, (uint8_t)event->data.ch);
     }
@@ -1577,7 +1660,7 @@ static void writer_title(solar_os_context_t *ctx, char *buffer, size_t buffer_le
 const solar_os_app_t solar_os_writer_app = {
     .name = "writer",
     .summary = "hybrid WYSIWYG Markdown editor",
-    .flags = SOLAR_OS_APP_FLAG_RESUMABLE,
+    .flags = SOLAR_OS_APP_FLAG_RESUMABLE | SOLAR_OS_APP_FLAG_KEY_EVENTS,
     .start = writer_start,
     .suspend = writer_suspend,
     .resume = writer_resume,
