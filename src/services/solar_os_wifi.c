@@ -1543,6 +1543,11 @@ esp_err_t solar_os_wifi_resume(void)
     return ESP_OK;
 }
 
+esp_netif_t *solar_os_wifi_get_sta_netif(void)
+{
+    return wifi_sta_netif;
+}
+
 esp_err_t solar_os_wifi_connect(const char *ssid, const char *password)
 {
     if (wifi_connectionless_fixed()) {

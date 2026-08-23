@@ -125,13 +125,18 @@ starts with only three bootstrap tools:
 
 - `system_status`: board ID, SolarOS version, uptime, free and largest internal
   RAM blocks, and free PSRAM.
-- `solaros_reference`: search the same package-aware registry exposed to users
-  by `man -k` and `man TOPIC`, returning compact authoritative API and system
-  contracts. It accepts exactly one `query` field combining the language and
+- `solaros_reference`: search the same package-aware manual source exposed to
+  users by `man -k` and `man TOPIC`. Python and Lua manuals have a generated
+  section index, so the tool returns up to three focused, firmware-matched
+  excerpts instead of a vague page summary or an oversized full manual. It
+  accepts exactly one `query` field combining the language and
   task, such as `{"query":"lua gfx drawing"}`. Every result includes mandatory
   SolarOS coding guidance: use documented constants rather than guessed
   strings or numbers, discover hardware names, respect package gates, and
-  preserve cleanup patterns. Graphics matches include copyable Python and Lua
+  preserve cleanup patterns. Search considers section names and excerpt text,
+  requires task terms to match, prioritizes the requested language, and can
+  include the counterpart-language excerpt for a mirrored service when that
+  contains the more complete contract. Graphics matches include copyable Python and Lua
   setup/cleanup skeletons using `gfx.WHITE`, `gfx.BLACK`, a verified target,
   and the language-correct `gfx.end()` or `gfx["end"]()`.
 - `tool_search`: find and activate up to five installed tools relevant to an
@@ -253,10 +258,13 @@ the model.
   plus five discovered tool schemas are serialized per provider turn.
 - Tool arguments: 4095 bytes, held in PSRAM for a request.
 - Tool result: 4095 bytes, allocated in PSRAM.
-- API-reference matches: at most three compact contracts per lookup.
+- API-reference matches: at most three excerpts of at most 900 bytes each per
+  lookup. Generated offsets point into the existing embedded manual body, so
+  the index does not duplicate that body in flash.
 - Manual search: fixed stack storage for at most 12 results. Embedded page text
   remains in flash. A verified SD override is loaded into PSRAM only while a
-  `man` page or agent reference result is being consumed.
+  `man` page or page-contract fallback is being consumed. Indexed scripting
+  excerpts always use the embedded manual that was built with the firmware.
 - Storage read/write content: 3072 bytes.
 - Storage ranged read: 2048 requested bytes; JSON output may stop earlier when
   escaping would exhaust the bounded tool result.

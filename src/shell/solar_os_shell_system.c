@@ -31,7 +31,9 @@
 #include "solar_os_shell_common.h"
 #include "solar_os_nvs_backup.h"
 
-static const char * const power_commands[] = {"status", "profile", "idle", "key", "sleep"};
+static const char * const power_commands[] = {
+    "status", "profile", "idle", "key", "sleep", "suspend",
+};
 static const char * const nvs_commands[] = {
     "status", "backup", "restore", "clear",
 };
@@ -103,7 +105,7 @@ static void audio_print_gain(solar_os_shell_io_t *term, float gain_db)
 void solar_os_shell_cmd_board(solar_os_context_t *ctx, int argc, char **argv)
 {
     solar_os_shell_io_t *term = terminal(ctx);
-    char caps[192];
+    char caps[SOLAR_OS_BOARD_CAPABILITIES_TEXT_MAX];
 
     (void)argv;
 
@@ -392,6 +394,26 @@ void solar_os_shell_cmd_sleep(solar_os_context_t *ctx, int argc, char **argv)
     solar_os_context_request_sleep(ctx);
 }
 
+void solar_os_shell_cmd_suspend(solar_os_context_t *ctx, int argc, char **argv)
+{
+    solar_os_shell_io_t *term = terminal(ctx);
+
+    (void)argv;
+
+    if (argc != 1) {
+        solar_os_shell_diag_unexpected(term, "suspend", argv[1], "suspend");
+        return;
+    }
+
+    if (solar_os_shell_io_kind(term) == SOLAR_OS_SHELL_IO_KIND_PORT) {
+        solar_os_shell_io_writeln(term, "suspend is only available from the display shell");
+        return;
+    }
+
+    solar_os_shell_io_writeln(term, "suspending; press KEY to resume");
+    solar_os_context_request_suspend(ctx);
+}
+
 static const char *power_wakeup_cause_name(int cause)
 {
     switch ((esp_sleep_wakeup_cause_t)cause) {
@@ -429,8 +451,9 @@ static void power_print_usage(solar_os_shell_io_t *term)
     solar_os_shell_io_writeln(term, "  power status");
     solar_os_shell_io_writeln(term, "  power profile [performance|balanced|battery|lowpower]");
     solar_os_shell_io_writeln(term, "  power idle [off|seconds]");
-    solar_os_shell_io_writeln(term, "  power key [off|light]");
+    solar_os_shell_io_writeln(term, "  power key [off|sleep|suspend]");
     solar_os_shell_io_writeln(term, "  power sleep");
+    solar_os_shell_io_writeln(term, "  power suspend");
 }
 
 static void power_print_status(solar_os_shell_io_t *term)
@@ -450,6 +473,12 @@ static void power_print_status(solar_os_shell_io_t *term)
     solar_os_shell_io_printf(term,
                              "Profile: %s\n",
                              solar_os_power_profile_name(status.profile));
+    solar_os_shell_io_printf(term,
+                             "Effective profile: %s\n",
+                             solar_os_power_profile_name(status.effective_profile));
+    solar_os_shell_io_printf(term,
+                             "Suspend: %s\n",
+                             status.suspend_active ? "active" : "inactive");
     solar_os_shell_io_printf(term,
                              "CPU: %" PRIu32 "-%" PRIu32 " MHz\n",
                              status.cpu_min_mhz,
@@ -598,19 +627,20 @@ void solar_os_shell_cmd_power(solar_os_context_t *ctx, int argc, char **argv)
             solar_os_shell_io_printf(term,
                                      "key: %s\n",
                                      solar_os_power_key_action_name(status.key_action));
-            solar_os_shell_io_writeln(term, "values: off light");
+            solar_os_shell_io_writeln(term, "values: off sleep suspend");
             return;
         }
         if (argc != 3) {
             solar_os_shell_diag_unexpected(term, "power key", argv[3],
-                                           "power key [off|light]");
+                                           "power key [off|sleep|suspend]");
             return;
         }
 
         solar_os_power_key_action_t action;
         if (!solar_os_power_parse_key_action(argv[2], &action)) {
             solar_os_shell_diag_invalid(term, "power key", "action", argv[2],
-                                        "off or light", "power key [off|light]", false);
+                                        "off, sleep, or suspend",
+                                        "power key [off|sleep|suspend]", false);
             return;
         }
 
@@ -641,11 +671,27 @@ void solar_os_shell_cmd_power(solar_os_context_t *ctx, int argc, char **argv)
         return;
     }
 
+    if (strcmp(argv[1], "suspend") == 0) {
+        if (argc != 2) {
+            solar_os_shell_diag_unexpected(term, "power suspend", argv[2],
+                                           "power suspend");
+            return;
+        }
+        if (solar_os_shell_io_kind(term) == SOLAR_OS_SHELL_IO_KIND_PORT) {
+            solar_os_shell_io_writeln(term,
+                                      "suspend is only available from the display shell");
+            return;
+        }
+        solar_os_shell_io_writeln(term, "suspending; press KEY to resume");
+        solar_os_context_request_suspend(ctx);
+        return;
+    }
+
     solar_os_shell_diag_subcommand(term,
                                    "power",
                                    argc,
                                    argv,
-                                   "power status|profile|idle|key|sleep",
+                                   "power status|profile|idle|key|sleep|suspend",
                                    power_commands,
                                    sizeof(power_commands) / sizeof(power_commands[0]));
 }
@@ -746,7 +792,7 @@ void solar_os_shell_cmd_status(solar_os_context_t *ctx, int argc, char **argv)
 #endif
 #if SOLAR_OS_PACKAGE_SERVICE_AUDIO
     solar_os_audio_get_status(&audio_status);
-    if (solar_os_board_has(SOLAR_OS_BOARD_CAP_AUDIO)) {
+    if (solar_os_audio_output_available()) {
         solar_os_shell_io_printf(term,
                                  "Audio: %s, %" PRIu32 " Hz %uch %ubit, vol %u, mic ",
                                  audio_status.initialized ? "on" : "off",

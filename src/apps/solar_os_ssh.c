@@ -103,9 +103,20 @@ static void ssh_flush(solar_os_context_t *ctx)
     }
 }
 
-static void ssh_request_close(solar_os_context_t *ctx)
+static bool ssh_is_private_display_session(solar_os_context_t *ctx)
 {
-    solar_os_context_request_terminal_preserve(ctx);
+    return ctx != NULL && solar_os_context_shell_session(ctx) == NULL;
+}
+
+static void ssh_request_close(solar_os_context_t *ctx, const char *status)
+{
+    if (ssh_is_private_display_session(ctx)) {
+        if (status != NULL && status[0] != '\0') {
+            solar_os_context_set_status_message(ctx, status);
+        }
+    } else {
+        solar_os_context_request_terminal_preserve(ctx);
+    }
     solar_os_context_request_exit(ctx);
 }
 
@@ -122,7 +133,8 @@ static void ssh_render_usage(solar_os_context_t *ctx)
 
     solar_os_shell_io_writeln(io, "usage: ssh [user@]host [port]");
     ssh_flush(ctx);
-    ssh_request_close(ctx);
+    ssh_request_close(ctx,
+                      "ssh: invalid target; usage: ssh [user@]host [port]");
 }
 
 static bool ssh_parse_port(const char *text, uint16_t *port)
@@ -219,9 +231,14 @@ static esp_err_t ssh_begin_connect(solar_os_context_t *ctx)
     memset(ssh_app.password, 0, sizeof(ssh_app.password));
     ssh_app.password_len = 0;
     if (err != ESP_OK) {
-        solar_os_shell_io_printf(io, "ssh start failed: %s\n", esp_err_to_name(err));
+        char status[SOLAR_OS_CONTEXT_STATUS_MESSAGE_MAX];
+        snprintf(status,
+                 sizeof(status),
+                 "ssh start failed: %s",
+                 esp_err_to_name(err));
+        solar_os_shell_io_printf(io, "%s\n", status);
         ssh_flush(ctx);
-        ssh_request_close(ctx);
+        ssh_request_close(ctx, status);
         return err;
     }
 
@@ -808,13 +825,16 @@ static void ssh_drain_events(solar_os_context_t *ctx)
             solar_os_shell_io_printf(io, "ssh: %s\n", event.message);
             ssh_flush(ctx);
             break;
-        case SOLAR_OS_SSH_EVENT_DISCONNECTED:
+        case SOLAR_OS_SSH_EVENT_DISCONNECTED: {
             solar_os_shell_io_printf(io, "ssh: %s\n", event.message);
             ssh_flush(ctx);
             solar_os_ssh_stop(ssh_app.session);
             ssh_app.session = NULL;
-            ssh_request_close(ctx);
+            char status[SOLAR_OS_CONTEXT_STATUS_MESSAGE_MAX];
+            snprintf(status, sizeof(status), "ssh: %s", event.message);
+            ssh_request_close(ctx, status);
             break;
+        }
         default:
             break;
         }
@@ -1073,7 +1093,7 @@ static bool ssh_event(solar_os_context_t *ctx, const solar_os_event_t *event)
             solar_os_ssh_stop(ssh_app.session);
             ssh_app.session = NULL;
         }
-        ssh_request_close(ctx);
+        ssh_request_close(ctx, NULL);
         return true;
     }
 
@@ -1111,7 +1131,7 @@ static bool ssh_event(solar_os_context_t *ctx, const solar_os_event_t *event)
 const solar_os_app_t solar_os_ssh_app = {
     .name = "ssh",
     .summary = "SSH client",
-    .flags = SOLAR_OS_APP_FLAG_RESUMABLE | SOLAR_OS_APP_FLAG_SHELL_INLINE,
+    .flags = SOLAR_OS_APP_FLAG_RESUMABLE,
     .start = ssh_start,
     .suspend = ssh_suspend,
     .resume = ssh_resume,

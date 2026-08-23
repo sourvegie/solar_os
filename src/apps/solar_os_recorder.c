@@ -31,6 +31,7 @@
 #include "solar_os_stream.h"
 #include "solar_os_task.h"
 #include "solar_os_tui.h"
+#include "solar_os_tui_widgets.h"
 
 #define RECORDER_TASK_STACK 8192U
 #define RECORDER_TASK_PRIORITY (tskIDLE_PRIORITY + 2U)
@@ -1164,24 +1165,24 @@ static void recorder_render_browser_tui(size_t rows, size_t cols)
     snprintf(footer, sizeof(footer),
              "%s | Enter open/play WAV  D select folder  Esc cancel",
              solar_os_storage_browser_path(recorder.browser));
-    recorder_clip(clipped, sizeof(clipped), footer,
-                  cols > 2U ? cols - 2U : 0U);
-    solar_os_tui_addstr(&recorder.tui, rows - 1U, 1U, clipped,
-                        SOLAR_OS_TUI_ATTR_BOLD);
+    solar_os_tui_draw_help(&recorder.tui, footer);
 }
 
 static void recorder_render_tui(void)
 {
     const size_t rows = solar_os_tui_rows(&recorder.tui);
     const size_t cols = solar_os_tui_cols(&recorder.tui);
-    if (rows < 5U || cols < 20U) return;
+    if (rows < 5U || cols < 20U) {
+        solar_os_tui_draw_too_small(&recorder.tui, "recorder");
+        solar_os_tui_refresh(&recorder.tui);
+        return;
+    }
     solar_os_tui_clear(&recorder.tui);
-    solar_os_tui_fill(&recorder.tui, 0U, 0U, 1U, cols, ' ',
-                      SOLAR_OS_TUI_ATTR_INVERSE | SOLAR_OS_TUI_ATTR_BOLD);
-    solar_os_tui_addstr(&recorder.tui, 0U, 1U,
-                        recorder.browser_mode != RECORDER_BROWSER_NONE ?
-                            "Recorder - Folder" : "Recorder",
-                        SOLAR_OS_TUI_ATTR_INVERSE | SOLAR_OS_TUI_ATTR_BOLD);
+    solar_os_tui_draw_title(
+        &recorder.tui,
+        recorder.browser_mode != RECORDER_BROWSER_NONE ?
+            "Recorder - Folder" : "Recorder",
+        NULL);
     if (recorder.browser_mode != RECORDER_BROWSER_NONE) {
         recorder_render_browser_tui(rows, cols);
     } else if (recorder.tab == RECORDER_TAB_SETUP) {
@@ -1200,8 +1201,7 @@ static void recorder_render_tui(void)
         const char *footer = recorder.editing_filename ?
             "Filename: type, Enter save, Esc cancel" :
             "Up/Down select  Left/Right change  Enter edit/browse";
-        solar_os_tui_addstr(&recorder.tui, rows - 1U, 1U, footer,
-                            SOLAR_OS_TUI_ATTR_BOLD);
+        solar_os_tui_draw_help(&recorder.tui, footer);
     } else {
         char elapsed[16], line[192], clipped[192];
         recorder_format_time(recorder.elapsed_ms, elapsed, sizeof(elapsed));
@@ -1230,9 +1230,9 @@ static void recorder_render_tui(void)
             solar_os_tui_addstr(&recorder.tui, 5U, 1U, clipped,
                                 SOLAR_OS_TUI_ATTR_NORMAL);
         }
-        solar_os_tui_addstr(&recorder.tui, rows - 1U, 1U,
-            "R record  M monitor  Space pause  S stop  P play  Tab setup  Esc exit",
-            SOLAR_OS_TUI_ATTR_BOLD);
+        solar_os_tui_draw_help(
+            &recorder.tui,
+            "R record  M monitor  Space pause  S stop  P play  Tab setup  Esc exit");
     }
     if (recorder.editing_filename) {
         char edit[144];
@@ -1674,10 +1674,7 @@ static esp_err_t recorder_start(solar_os_context_t *ctx)
     recorder.mode = !force_tui && recorder_graphical_session(ctx) ?
         RECORDER_MODE_GRAPHICS : RECORDER_MODE_TUI;
     if (recorder.mode == RECORDER_MODE_TUI) {
-        err = solar_os_tui_begin(&recorder.tui, ctx);
-        if (err == ESP_OK) {
-            (void)solar_os_tui_enable_diff(&recorder.tui, true);
-        }
+        err = solar_os_tui_screen_begin(&recorder.tui, ctx);
     } else {
         err = solar_os_cassette_widget_create(&recorder.cassette);
         if (err == ESP_OK) err = solar_os_oscilloscope_widget_create(

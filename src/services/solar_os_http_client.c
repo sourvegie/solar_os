@@ -2,6 +2,7 @@
 
 #include <limits.h>
 #include <string.h>
+#include <strings.h>
 
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
@@ -36,7 +37,37 @@ static bool solar_os_http_cancelled(const solar_os_http_request_t *request)
 {
     return request->cancel_requested ||
         (request->options.cancel_flag != NULL &&
-         *request->options.cancel_flag);
+         *request->options.cancel_flag) ||
+        (request->options.should_cancel != NULL &&
+         request->options.should_cancel(request->options.cancel_user_data));
+}
+
+bool solar_os_http_method_parse(const char *text,
+                                solar_os_http_method_t *method)
+{
+    if (text == NULL || method == NULL) {
+        return false;
+    }
+
+    static const struct {
+        const char *name;
+        solar_os_http_method_t method;
+    } methods[] = {
+        {"GET", SOLAR_OS_HTTP_METHOD_GET},
+        {"POST", SOLAR_OS_HTTP_METHOD_POST},
+        {"PUT", SOLAR_OS_HTTP_METHOD_PUT},
+        {"PATCH", SOLAR_OS_HTTP_METHOD_PATCH},
+        {"DELETE", SOLAR_OS_HTTP_METHOD_DELETE},
+        {"HEAD", SOLAR_OS_HTTP_METHOD_HEAD},
+    };
+
+    for (size_t i = 0; i < sizeof(methods) / sizeof(methods[0]); i++) {
+        if (strcasecmp(text, methods[i].name) == 0) {
+            *method = methods[i].method;
+            return true;
+        }
+    }
+    return false;
 }
 
 static bool solar_os_http_method_valid(solar_os_http_method_t method)
@@ -221,6 +252,27 @@ static esp_err_t solar_os_http_deliver_data(solar_os_http_request_t *request,
     return err;
 }
 
+static esp_err_t solar_os_http_deliver_response(solar_os_http_request_t *request,
+                                                int status_code,
+                                                int64_t content_length)
+{
+    if (request->options.event_handler == NULL) {
+        return ESP_OK;
+    }
+
+    const solar_os_http_event_t event = {
+        .type = SOLAR_OS_HTTP_EVENT_RESPONSE,
+        .status_code = status_code,
+        .content_length = content_length,
+    };
+    const esp_err_t err = request->options.event_handler(&event,
+                                                         request->options.user_data);
+    if (err != ESP_OK) {
+        request->event_error = err;
+    }
+    return err;
+}
+
 static esp_err_t solar_os_http_perform_stream(solar_os_http_request_t *request,
                                               esp_http_client_handle_t client,
                                               int *status_code,
@@ -279,6 +331,13 @@ static esp_err_t solar_os_http_perform_stream(solar_os_http_request_t *request,
             (void)esp_http_client_clear_response_buffer(client);
             (void)esp_http_client_close(client);
             continue;
+        }
+
+        err = solar_os_http_deliver_response(request,
+                                             *status_code,
+                                             *content_length);
+        if (err != ESP_OK) {
+            return err;
         }
 
         if (request->options.method == SOLAR_OS_HTTP_METHOD_HEAD) {
@@ -519,4 +578,172 @@ esp_err_t solar_os_http_request_destroy(solar_os_http_request_t *request)
     vSemaphoreDelete(request->lock);
     solar_os_memory_free(request);
     return ESP_OK;
+}
+
+typedef struct {
+    solar_os_http_buffered_response_t *response;
+    size_t body_capacity;
+    size_t header_bytes;
+    bool follow_redirects;
+    solar_os_http_event_fn chained_handler;
+    void *chained_user_data;
+    esp_err_t error;
+} solar_os_http_buffered_collector_t;
+
+static void solar_os_http_buffered_headers_clear(
+    solar_os_http_buffered_response_t *response)
+{
+    if (response == NULL || response->headers == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < response->header_count; i++) {
+        solar_os_memory_free(response->headers[i].name);
+    }
+    response->header_count = 0;
+}
+
+void solar_os_http_buffered_response_clear(
+    solar_os_http_buffered_response_t *response)
+{
+    if (response == NULL) {
+        return;
+    }
+    solar_os_http_buffered_headers_clear(response);
+    solar_os_memory_free(response->headers);
+    solar_os_memory_free(response->body);
+    memset(response, 0, sizeof(*response));
+}
+
+static esp_err_t solar_os_http_buffered_store_header(
+    solar_os_http_buffered_collector_t *collector,
+    const solar_os_http_event_t *event)
+{
+    solar_os_http_buffered_response_t *response = collector->response;
+    if (event->header_name == NULL || event->header_value == NULL) {
+        return ESP_OK;
+    }
+    if (collector->follow_redirects &&
+        event->status_code >= 300 && event->status_code < 400) {
+        return ESP_OK;
+    }
+
+    const size_t name_len = strlen(event->header_name);
+    const size_t value_len = strlen(event->header_value);
+    const size_t stored_bytes = name_len + value_len + 2U;
+    if (response->header_count >= SOLAR_OS_HTTP_BUFFERED_MAX_HEADERS ||
+        stored_bytes > SOLAR_OS_HTTP_BUFFERED_MAX_HEADER_BYTES -
+            collector->header_bytes) {
+        response->headers_truncated = true;
+        return ESP_OK;
+    }
+
+    char *storage = solar_os_memory_alloc(stored_bytes,
+                                          SOLAR_OS_MEMORY_EXTERNAL_PREFERRED,
+                                          "http.header");
+    if (storage == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    memcpy(storage, event->header_name, name_len + 1U);
+    memcpy(storage + name_len + 1U, event->header_value, value_len + 1U);
+
+    solar_os_http_response_header_t *header =
+        &response->headers[response->header_count++];
+    header->name = storage;
+    header->value = storage + name_len + 1U;
+    collector->header_bytes += stored_bytes;
+    return ESP_OK;
+}
+
+static esp_err_t solar_os_http_buffered_event(
+    const solar_os_http_event_t *event,
+    void *user_data)
+{
+    solar_os_http_buffered_collector_t *collector = user_data;
+    if (collector == NULL || event == NULL) {
+        return ESP_OK;
+    }
+
+    esp_err_t err = ESP_OK;
+    if (event->type == SOLAR_OS_HTTP_EVENT_HEADER) {
+        err = solar_os_http_buffered_store_header(collector, event);
+    } else if (event->type == SOLAR_OS_HTTP_EVENT_DATA && event->data_len > 0) {
+        solar_os_http_buffered_response_t *response = collector->response;
+        const size_t remaining = collector->body_capacity - response->body_len;
+        const size_t copy_len = event->data_len < remaining ?
+            event->data_len : remaining;
+        if (copy_len > 0) {
+            memcpy(response->body + response->body_len, event->data, copy_len);
+            response->body_len += copy_len;
+        }
+        if (copy_len < event->data_len) {
+            response->body_truncated = true;
+            err = ESP_ERR_INVALID_SIZE;
+        }
+    }
+
+    if (err == ESP_OK && collector->chained_handler != NULL) {
+        err = collector->chained_handler(event, collector->chained_user_data);
+    }
+    if (err != ESP_OK) {
+        collector->error = err;
+    }
+    return err;
+}
+
+esp_err_t solar_os_http_perform_buffered(
+    const solar_os_http_request_options_t *options,
+    size_t max_body_bytes,
+    solar_os_http_buffered_response_t *response)
+{
+    if (options == NULL || response == NULL ||
+        max_body_bytes > SOLAR_OS_HTTP_BUFFERED_MAX_BODY) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    memset(response, 0, sizeof(*response));
+    response->response.status_code = -1;
+    response->response.content_length = -1;
+    response->headers = solar_os_memory_calloc(
+        SOLAR_OS_HTTP_BUFFERED_MAX_HEADERS,
+        sizeof(*response->headers),
+        SOLAR_OS_MEMORY_EXTERNAL_PREFERRED,
+        "http.headers");
+    if (response->headers == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    if (max_body_bytes > 0) {
+        response->body = solar_os_memory_alloc(max_body_bytes,
+                                                SOLAR_OS_MEMORY_EXTERNAL_PREFERRED,
+                                                "http.body");
+        if (response->body == NULL) {
+            solar_os_http_buffered_response_clear(response);
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    solar_os_http_buffered_collector_t collector = {
+        .response = response,
+        .body_capacity = max_body_bytes,
+        .follow_redirects = options->follow_redirects,
+        .chained_handler = options->event_handler,
+        .chained_user_data = options->user_data,
+    };
+    solar_os_http_request_options_t buffered_options = *options;
+    buffered_options.event_handler = solar_os_http_buffered_event;
+    buffered_options.user_data = &collector;
+
+    solar_os_http_request_t *request = NULL;
+    esp_err_t err = solar_os_http_request_create(&buffered_options, &request);
+    if (err == ESP_OK) {
+        err = solar_os_http_request_perform(request, &response->response);
+    }
+    const esp_err_t destroy_err = solar_os_http_request_destroy(request);
+    if (err == ESP_OK && destroy_err != ESP_OK) {
+        err = destroy_err;
+    }
+    if (response->body_truncated && err == ESP_ERR_INVALID_SIZE &&
+        collector.error == ESP_ERR_INVALID_SIZE) {
+        err = ESP_OK;
+    }
+    return err;
 }

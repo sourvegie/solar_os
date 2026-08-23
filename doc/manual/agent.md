@@ -79,7 +79,9 @@ actually starts.
   telemetry without printing the API key. It also reports how many tool calls
   the last request used from its configured budget.
 - If a generated script guesses an API or display name, ask the agent to call
-  `solaros_reference` and the relevant discovery tool first.
+  `solaros_reference` with the language and exact task, then call the relevant
+  discovery tool. The reference lookup returns focused sections from the
+  firmware's Python and Lua manuals rather than only their page summaries.
 - If a call is denied, the model receives a structured denial and can explain
   the result or choose another approach.
 

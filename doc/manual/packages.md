@@ -31,6 +31,16 @@ runtime playback device even when no built-in codec or DAC exists.
 built-in audio. That capability guarantees a spare I2S controller and at least
 three runtime-safe output GPIOs, so the package is pruned from boards such as
 ODROID-GO that cannot expose all required signals.
+`expansion.ssd1683` reuses the 400x300 SSD1683 controller implementation with a
+named SPI bus and runtime-claimed CS, D/C, reset, and BUSY pins. It registers an
+auxiliary display target and uses changed-frame partial windows in automatic
+mode; it does not replace or suspend a built-in display.
+`expansion.cardkb` polls the M5Stack Unit CardKB at its fixed I2C address and
+publishes its character taps and navigation keys through the shared input
+service used by shells and foreground apps.
+`expansion.sdspi` adds removable SPI microSD storage to boards that do not have
+built-in SD hardware. It uses a named expansion SPI bus and mounts at
+`/sdcard` without changing the internal-flash root filesystem.
 
 ## Ownership Rules
 
@@ -96,11 +106,16 @@ audio backend while
 composite scanout owns I2S0, so Game Boy runs without MiniGB APU or synth output
 in this flavor.
 
-Network ownership is intentionally split. `network.base`, `network.mqtt`,
+Network ownership is intentionally split. `network.base`, `network.wireguard`, `network.mqtt`,
 `network.ssh`, `network.mail`, `messaging.gateway`, `network.http-client`, and
 `network.http-server` own their individual implementations. Image and document
 decoding are separate `media.image` and `media.document` packages, so selecting
 `app.curl`, for example, does not pull MQTT, SSH, mail, or image dependencies.
+
+`network.wireguard` depends directly on `service.wifi` and lwIP. It owns the
+native tunnel, its bounded route table, the lwIP route hook, persistent client
+profile, Wi-Fi address-event handling, and light-sleep lifecycle. It is not part
+of either embedded scripting runtime.
 
 `network.http-client` owns the shared TLS-enabled HTTP transport used by `curl`,
 `webradio`, and `web`. It exposes request headers and bodies, redirects,

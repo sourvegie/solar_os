@@ -1,6 +1,5 @@
 #include "solar_os_board_caps.h"
 
-#include <stdio.h>
 #include <string.h>
 
 typedef struct {
@@ -97,10 +96,10 @@ const char *solar_os_board_capability_name(solar_os_board_capability_t capabilit
     return "unknown";
 }
 
-void solar_os_board_capabilities_format(char *buffer, size_t buffer_len)
+bool solar_os_board_capabilities_format(char *buffer, size_t buffer_len)
 {
     if (buffer == NULL || buffer_len == 0) {
-        return;
+        return false;
     }
 
     buffer[0] = '\0';
@@ -113,26 +112,26 @@ void solar_os_board_capabilities_format(char *buffer, size_t buffer_len)
             continue;
         }
 
-        const int written = snprintf(buffer + used,
-                                     buffer_len - used,
-                                     "%s%s",
-                                     any ? " " : "",
-                                     capability_names[i].name);
-        if (written < 0) {
-            buffer[used] = '\0';
-            return;
+        const size_t separator_len = any ? 1U : 0U;
+        const size_t name_len = strlen(capability_names[i].name);
+        if (separator_len + name_len >= buffer_len - used) {
+            return false;
         }
 
-        const size_t add = (size_t)written;
-        if (add >= buffer_len - used) {
-            buffer[buffer_len - 1] = '\0';
-            return;
+        if (separator_len != 0) {
+            buffer[used++] = ' ';
         }
-        used += add;
+        memcpy(buffer + used, capability_names[i].name, name_len);
+        used += name_len;
+        buffer[used] = '\0';
         any = true;
     }
 
     if (!any) {
-        strlcpy(buffer, "none", buffer_len);
+        if (sizeof("none") > buffer_len) {
+            return false;
+        }
+        memcpy(buffer, "none", sizeof("none"));
     }
+    return true;
 }

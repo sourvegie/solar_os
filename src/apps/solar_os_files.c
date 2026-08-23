@@ -27,6 +27,7 @@
 #include "solar_os_task.h"
 #include "solar_os_terminal.h"
 #include "solar_os_tui.h"
+#include "solar_os_tui_widgets.h"
 #include "solar_os_zip.h"
 
 #define FILES_NAME_MAX 96
@@ -664,61 +665,6 @@ static void files_toggle_selection(files_pane_t *pane)
     files_advance_to_next_selectable(pane);
 }
 
-static void files_clip(char *out, size_t out_len, const char *text, size_t width)
-{
-    if (out == NULL || out_len == 0) {
-        return;
-    }
-    if (text == NULL) {
-        text = "";
-    }
-
-    size_t used = 0;
-    size_t cells = 0;
-    const unsigned char *p = (const unsigned char *)text;
-    while (*p != '\0' && cells < width) {
-        size_t char_len = 1;
-        if ((p[0] & 0xe0U) == 0xc0U && p[1] != '\0' &&
-            (p[1] & 0xc0U) == 0x80U) {
-            char_len = 2;
-        } else if ((p[0] & 0xf0U) == 0xe0U && p[1] != '\0' && p[2] != '\0' &&
-                   (p[1] & 0xc0U) == 0x80U &&
-                   (p[2] & 0xc0U) == 0x80U) {
-            char_len = 3;
-        } else if ((p[0] & 0xf8U) == 0xf0U && p[1] != '\0' && p[2] != '\0' &&
-                   p[3] != '\0' &&
-                   (p[1] & 0xc0U) == 0x80U &&
-                   (p[2] & 0xc0U) == 0x80U &&
-                   (p[3] & 0xc0U) == 0x80U) {
-            char_len = 4;
-        }
-        if (used + char_len >= out_len) {
-            break;
-        }
-        memcpy(&out[used], p, char_len);
-        used += char_len;
-        p += char_len;
-        cells++;
-    }
-    out[used] = '\0';
-}
-
-static void files_add_clipped(size_t row,
-                              size_t col,
-                              size_t width,
-                              const char *text,
-                              uint8_t attr)
-{
-    char buffer[SOLAR_OS_TERMINAL_MAX_COLS * 4U + 1U];
-    const size_t clipped_width = width < SOLAR_OS_TERMINAL_MAX_COLS ? width : SOLAR_OS_TERMINAL_MAX_COLS;
-
-    if (width == 0) {
-        return;
-    }
-    files_clip(buffer, sizeof(buffer), text, clipped_width);
-    solar_os_tui_addstr(&files.tui, row, col, buffer, attr);
-}
-
 static const char *files_transaction_name(files_transaction_kind_t kind)
 {
     switch (kind) {
@@ -860,9 +806,9 @@ static void files_draw_entry(files_pane_t *pane,
                            marked ? '*' : ' ',
                            marked ? (base_attr | SOLAR_OS_TUI_ATTR_BOLD) : base_attr);
     }
-    files_add_clipped(row, content_col, name_width, name, name_attr);
+    solar_os_tui_write_cell(&files.tui, row, content_col, name_width, name, name_attr);
     if (size_width > 0) {
-        files_add_clipped(row, col + width - size_width, size_width, size_text, base_attr);
+        solar_os_tui_write_cell(&files.tui, row, col + width - size_width, size_width, size_text, base_attr);
     }
 }
 
@@ -882,7 +828,7 @@ static void files_draw_pane(files_pane_t *pane,
                                       : SOLAR_OS_TUI_ATTR_BOLD;
     solar_os_tui_box(&files.tui, row, col, height, width, SOLAR_OS_TUI_ATTR_NORMAL);
     solar_os_tui_fill(&files.tui, row, col + 1, 1, width - 2U, ' ', title_attr);
-    files_add_clipped(row, col + 2, width - 4U, pane->path, title_attr);
+    solar_os_tui_write_cell(&files.tui, row, col + 2, width - 4U, pane->path, title_attr);
 
     const size_t list_row = row + 1U;
     const size_t list_col = col + 1U;
@@ -914,27 +860,22 @@ static void files_draw_pane(files_pane_t *pane,
 static void files_draw_bottom(size_t rows, size_t cols)
 {
     const size_t msg_row = rows >= 2 ? rows - 2U : 0;
-    const size_t key_row = rows >= 1 ? rows - 1U : 0;
-
     solar_os_tui_fill(&files.tui, msg_row, 0, 1, cols, ' ', SOLAR_OS_TUI_ATTR_NORMAL);
     if (files.input_mode == FILES_INPUT_MKDIR || files.input_mode == FILES_INPUT_ZIP) {
         const char *label = files.input_mode == FILES_INPUT_ZIP ? "zip: " : "mkdir: ";
         char prompt[FILES_INPUT_MAX + 12];
         snprintf(prompt, sizeof(prompt), "%s%s", label, files.input);
-        files_add_clipped(msg_row, 0, cols, prompt, SOLAR_OS_TUI_ATTR_NORMAL);
+        solar_os_tui_write_cell(&files.tui, msg_row, 0, cols, prompt, SOLAR_OS_TUI_ATTR_NORMAL);
         solar_os_tui_move(&files.tui, msg_row, strlen(label) + files.input_len);
     } else if (files.input_mode == FILES_INPUT_DELETE_CONFIRM) {
-        files_add_clipped(msg_row, 0, cols, files.message, SOLAR_OS_TUI_ATTR_BOLD);
+        solar_os_tui_write_cell(&files.tui, msg_row, 0, cols, files.message, SOLAR_OS_TUI_ATTR_BOLD);
     } else {
-        files_add_clipped(msg_row, 0, cols, files.message, SOLAR_OS_TUI_ATTR_NORMAL);
+        solar_os_tui_write_cell(&files.tui, msg_row, 0, cols, files.message, SOLAR_OS_TUI_ATTR_NORMAL);
     }
 
-    solar_os_tui_fill(&files.tui, key_row, 0, 1, cols, ' ', SOLAR_OS_TUI_ATTR_INVERSE);
-    files_add_clipped(key_row,
-                      0,
-                      cols,
-                      "F3 View F4 Edit F5 Copy F6 Move F7 Mkdir F8 Del F9 Zip",
-                      SOLAR_OS_TUI_ATTR_INVERSE);
+    solar_os_tui_draw_help(
+        &files.tui,
+        "F3 View F4 Edit F5 Copy F6 Move F7 Mkdir F8 Del F9 Zip");
 }
 
 static void files_render(solar_os_context_t *ctx)
@@ -950,7 +891,7 @@ static void files_render(solar_os_context_t *ctx)
     const size_t min_rows = files.launcher_mode ? 4U : 6U;
     if (rows < min_rows || cols < min_cols) {
         solar_os_tui_clear(&files.tui);
-        solar_os_tui_addstr(&files.tui, 0, 0, "files: terminal too small", SOLAR_OS_TUI_ATTR_NORMAL);
+        solar_os_tui_draw_too_small(&files.tui, "files");
         solar_os_tui_refresh(&files.tui);
         return;
     }
@@ -967,7 +908,7 @@ static void files_render(solar_os_context_t *ctx)
         const char *title = files.show_hidden ?
             "files  hidden:on  Tab switch  Enter open  q quit" :
             "files  hidden:off Tab switch  Enter open  q quit";
-        files_add_clipped(0,
+        solar_os_tui_write_cell(&files.tui, 0,
                           0,
                           cols,
                           title,
@@ -2071,11 +2012,10 @@ static esp_err_t files_start(solar_os_context_t *ctx)
         return ESP_ERR_INVALID_ARG;
     }
     files.show_hidden = !files.launcher_mode;
-    esp_err_t err = solar_os_tui_begin(&files.tui, ctx);
+    esp_err_t err = solar_os_tui_screen_begin(&files.tui, ctx);
     if (err != ESP_OK) {
         return err;
     }
-    (void)solar_os_tui_enable_diff(&files.tui, true);
 
     char start[SOLAR_OS_STORAGE_PATH_MAX];
     err = solar_os_shell_resolve_path(ctx, arg, start, sizeof(start));

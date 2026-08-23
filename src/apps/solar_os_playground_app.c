@@ -22,6 +22,7 @@
 #include "solar_os_task.h"
 #include "solar_os_terminal.h"
 #include "solar_os_tui.h"
+#include "solar_os_tui_widgets.h"
 
 #define PLAYGROUND_APP_TASK_STACK 16384U
 #define PLAYGROUND_APP_TASK_PRIORITY (tskIDLE_PRIORITY + 2)
@@ -81,38 +82,6 @@ static bool playground_parse_target(const char *value,
 static solar_os_shell_io_t *playground_io(solar_os_context_t *ctx)
 {
     return ctx != NULL ? solar_os_context_shell_io(ctx) : NULL;
-}
-
-static void playground_write_cell(size_t row,
-                                  size_t col,
-                                  size_t width,
-                                  const char *text,
-                                  uint8_t attr)
-{
-    const size_t rows = solar_os_tui_rows(&playground.tui);
-    const size_t cols = solar_os_tui_cols(&playground.tui);
-    char clipped[PLAYGROUND_APP_LINE_MAX];
-    if (row >= rows || col >= cols || width == 0U) {
-        return;
-    }
-    if (col + width > cols) {
-        width = cols - col;
-    }
-    solar_os_tui_fill(&playground.tui, row, col, 1U, width, ' ', attr);
-    size_t copy = text != NULL ? strlen(text) : 0U;
-    if (copy > width) {
-        copy = width;
-    }
-    if (copy >= sizeof(clipped)) {
-        copy = sizeof(clipped) - 1U;
-    }
-    if (copy > 0U) {
-        memcpy(clipped, text, copy);
-    }
-    clipped[copy] = '\0';
-    if (copy > 0U) {
-        solar_os_tui_addstr(&playground.tui, row, col, clipped, attr);
-    }
 }
 
 static bool playground_contains_casefold(const char *text, const char *query)
@@ -312,7 +281,6 @@ static void playground_app_marker(
 
 static void playground_render_header(void)
 {
-    const size_t cols = solar_os_tui_cols(&playground.tui);
     char header[PLAYGROUND_APP_LINE_MAX];
     if (playground.searching || playground.search[0] != '\0') {
         snprintf(header,
@@ -336,12 +304,7 @@ static void playground_render_header(void)
     } else {
         strlcpy(header, "Playground", sizeof(header));
     }
-    playground_write_cell(0U,
-                          0U,
-                          cols,
-                          header,
-                          SOLAR_OS_TUI_ATTR_INVERSE |
-                              SOLAR_OS_TUI_ATTR_BOLD);
+    solar_os_tui_draw_title(&playground.tui, header, NULL);
 }
 
 static void playground_render_tree(void)
@@ -394,10 +357,10 @@ static void playground_render_tree(void)
         }
         const uint8_t attr = index == playground.cursor ?
             SOLAR_OS_TUI_ATTR_INVERSE : SOLAR_OS_TUI_ATTR_NORMAL;
-        playground_write_cell(row + 1U, 0U, cols, line, attr);
+        solar_os_tui_write_cell(&playground.tui, row + 1U, 0U, cols, line, attr);
     }
     for (size_t row = visible_rows + 1U; row + 1U < rows; row++) {
-        playground_write_cell(row, 0U, cols, "", SOLAR_OS_TUI_ATTR_NORMAL);
+        solar_os_tui_write_cell(&playground.tui, row, 0U, cols, "", SOLAR_OS_TUI_ATTR_NORMAL);
     }
 
     const char *footer = playground.status[0] != '\0' ?
@@ -407,11 +370,7 @@ static void playground_render_tree(void)
         footer = "Uninstall selected application? y/N";
     }
     if (rows > 1U) {
-        playground_write_cell(rows - 1U,
-                              0U,
-                              cols,
-                              footer,
-                              SOLAR_OS_TUI_ATTR_INVERSE);
+        solar_os_tui_draw_help(&playground.tui, footer);
     }
 }
 
@@ -445,15 +404,15 @@ static void playground_render_details(void)
                  app.name,
                  playground_runtime_short(app.runtime),
                  app.version);
-        playground_write_cell(row++, 0U, cols, line, SOLAR_OS_TUI_ATTR_BOLD);
+        solar_os_tui_write_cell(&playground.tui, row++, 0U, cols, line, SOLAR_OS_TUI_ATTR_BOLD);
     }
     if (row + 1U < rows) {
-        playground_write_cell(
+        solar_os_tui_write_cell(&playground.tui,
             row++, 0U, cols, app.description, SOLAR_OS_TUI_ATTR_NORMAL);
     }
     if (row + 1U < rows) {
         snprintf(line, sizeof(line), "by %s", app.author);
-        playground_write_cell(row++, 0U, cols, line, SOLAR_OS_TUI_ATTR_NORMAL);
+        solar_os_tui_write_cell(&playground.tui, row++, 0U, cols, line, SOLAR_OS_TUI_ATTR_NORMAL);
     }
     if (row + 1U < rows) {
         if (!app.compatible) {
@@ -471,10 +430,10 @@ static void playground_render_details(void)
                      "Install size %u bytes",
                      (unsigned)app.size);
         }
-        playground_write_cell(row++, 0U, cols, line, SOLAR_OS_TUI_ATTR_NORMAL);
+        solar_os_tui_write_cell(&playground.tui, row++, 0U, cols, line, SOLAR_OS_TUI_ATTR_NORMAL);
     }
     while (row + 1U < rows) {
-        playground_write_cell(row++, 0U, cols, "", SOLAR_OS_TUI_ATTR_NORMAL);
+        solar_os_tui_write_cell(&playground.tui, row++, 0U, cols, "", SOLAR_OS_TUI_ATTR_NORMAL);
     }
     const char *footer = playground.status[0] != '\0' ?
         playground.status :
@@ -484,11 +443,7 @@ static void playground_render_details(void)
         footer = "Uninstall selected application? y/N";
     }
     if (rows > 1U) {
-        playground_write_cell(rows - 1U,
-                              0U,
-                              cols,
-                              footer,
-                              SOLAR_OS_TUI_ATTR_INVERSE);
+        solar_os_tui_draw_help(&playground.tui, footer);
     }
 }
 
@@ -1062,7 +1017,7 @@ static esp_err_t playground_start(solar_os_context_t *ctx)
         reload_err = solar_os_playground_reload();
     }
     playground_collapse_all_but_first_populated();
-    esp_err_t err = solar_os_tui_begin(&playground.tui, ctx);
+    esp_err_t err = solar_os_tui_screen_begin(&playground.tui, ctx);
     if (err != ESP_OK) {
         solar_os_shell_io_printf(
             playground_io(ctx),
@@ -1072,7 +1027,6 @@ static esp_err_t playground_start(solar_os_context_t *ctx)
         return ESP_OK;
     }
     playground.tui_active = true;
-    (void)solar_os_tui_enable_diff(&playground.tui, true);
     if (force_refresh) {
         (void)playground_start_operation(
             PLAYGROUND_OPERATION_REFRESH, NULL, SOLAR_OS_PLAYGROUND_TARGET_AUTO);

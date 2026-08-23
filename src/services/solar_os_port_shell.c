@@ -814,6 +814,10 @@ static bool port_shell_emit_char(char ch, void *user)
         solar_os_shell_io_writeln(solar_os_shell_session_io(state->session),
                                   "sleep is only available from the display shell");
     }
+    if (solar_os_context_take_suspend_request(&state->ctx)) {
+        solar_os_shell_io_writeln(solar_os_shell_session_io(state->session),
+                                  "suspend is only available from the display shell");
+    }
     port_shell_process_requests(state);
     return !port_shell_should_stop(state);
 }

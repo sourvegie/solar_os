@@ -12,6 +12,7 @@
 #include "solar_os_memory.h"
 #include "solar_os_terminal.h"
 #include "solar_os_tui.h"
+#include "solar_os_tui_widgets.h"
 
 #define EMAIL_APP_LINE_MAX (SOLAR_OS_TERMINAL_MAX_COLS * 4U + 1U)
 #define EMAIL_APP_DETAIL_MAX 1200U
@@ -67,45 +68,6 @@ static size_t email_app_char_len(const char *text)
     return 1;
 }
 
-static size_t email_app_clip_len(const char *text, size_t cols, size_t bytes_max)
-{
-    size_t bytes = 0;
-    size_t used_cols = 0;
-    while (text != NULL && text[bytes] != '\0' && used_cols < cols) {
-        const size_t length = email_app_char_len(text + bytes);
-        if (length == 0 || bytes + length > bytes_max) {
-            break;
-        }
-        bytes += length;
-        used_cols++;
-    }
-    return bytes;
-}
-
-static void email_app_cell(size_t row,
-                           size_t col,
-                           size_t width,
-                           const char *text,
-                           uint8_t attr)
-{
-    const size_t rows = solar_os_tui_rows(&email_app.tui);
-    const size_t cols = solar_os_tui_cols(&email_app.tui);
-    char clipped[EMAIL_APP_LINE_MAX];
-    if (row >= rows || col >= cols || width == 0) {
-        return;
-    }
-    if (col + width > cols) {
-        width = cols - col;
-    }
-    solar_os_tui_fill(&email_app.tui, row, col, 1, width, ' ', attr);
-    const size_t length = email_app_clip_len(text, width, sizeof(clipped) - 1U);
-    if (length > 0) {
-        memcpy(clipped, text, length);
-        clipped[length] = '\0';
-        solar_os_tui_addstr(&email_app.tui, row, col, clipped, attr);
-    }
-}
-
 static size_t email_app_content_rows(void)
 {
     const size_t rows = solar_os_tui_rows(&email_app.tui);
@@ -141,14 +103,13 @@ static void email_app_refresh(void)
 
 static void email_app_ensure_visible(void)
 {
-    const size_t visible = email_app_content_rows();
-    if (visible == 0 || email_app.count == 0) {
-        email_app.top = 0;
-    } else if (email_app.cursor < email_app.top) {
-        email_app.top = email_app.cursor;
-    } else if (email_app.cursor >= email_app.top + visible) {
-        email_app.top = email_app.cursor - visible + 1U;
-    }
+    solar_os_tui_viewport_t viewport = {
+        .cursor = email_app.cursor, .top = email_app.top,
+    };
+    solar_os_tui_viewport_reconcile(&viewport, email_app.count,
+                                    email_app_content_rows());
+    email_app.cursor = viewport.cursor;
+    email_app.top = viewport.top;
 }
 
 static void email_app_flatten(char *text)
@@ -172,11 +133,7 @@ static void email_app_render_list(void)
              (unsigned)email_app.status.unread,
              email_app.status.syncing ? "  syncing" : "",
              email_app.unread_only ? "  filtered" : "");
-    email_app_cell(0,
-                   0,
-                   cols,
-                   line,
-                   SOLAR_OS_TUI_ATTR_INVERSE | SOLAR_OS_TUI_ATTR_BOLD);
+    solar_os_tui_draw_title(&email_app.tui, line, NULL);
 
     const size_t visible = email_app_content_rows();
     for (size_t row = 0; row < visible; row++) {
@@ -192,7 +149,7 @@ static void email_app_render_list(void)
                     empty = "No synchronized email";
                 }
             }
-            email_app_cell(row + 1U, 0, cols, empty, SOLAR_OS_TUI_ATTR_NORMAL);
+            solar_os_tui_write_cell(&email_app.tui, row + 1U, 0, cols, empty, SOLAR_OS_TUI_ATTR_NORMAL);
             continue;
         }
         const solar_os_email_message_t *message = &email_app.messages[index];
@@ -206,7 +163,7 @@ static void email_app_render_list(void)
                  cols >= 32U && message->from[0] != '\0' ? message->from : "",
                  cols >= 32U && message->from[0] != '\0' ? ": " : "",
                  subject);
-        email_app_cell(row + 1U,
+        solar_os_tui_write_cell(&email_app.tui, row + 1U,
                        0,
                        cols,
                        line,
@@ -214,11 +171,8 @@ static void email_app_render_list(void)
                                                  : SOLAR_OS_TUI_ATTR_NORMAL);
     }
     if (rows > 0) {
-        email_app_cell(rows - 1U,
-                       0,
-                       cols,
-                       "Enter open  u filter  m read  r refresh  q quit",
-                       SOLAR_OS_TUI_ATTR_INVERSE);
+        solar_os_tui_draw_help(&email_app.tui,
+                               "Enter open  u filter  m read  r refresh  q quit");
     }
 }
 
@@ -307,13 +261,9 @@ static void email_app_render_detail(void)
     char header[EMAIL_APP_LINE_MAX];
     char line[EMAIL_APP_LINE_MAX];
     snprintf(header, sizeof(header), "Email  UID %lu", (unsigned long)email_app.detail.uid);
-    email_app_cell(0,
-                   0,
-                   cols,
-                   header,
-                   SOLAR_OS_TUI_ATTR_INVERSE | SOLAR_OS_TUI_ATTR_BOLD);
+    solar_os_tui_draw_title(&email_app.tui, header, NULL);
     for (size_t row = 0; row < visible; row++) {
-        email_app_cell(row + 1U, 0, cols, "", SOLAR_OS_TUI_ATTR_NORMAL);
+        solar_os_tui_write_cell(&email_app.tui, row + 1U, 0, cols, "", SOLAR_OS_TUI_ATTR_NORMAL);
     }
     size_t offset = 0;
     size_t logical = 0;
@@ -327,7 +277,7 @@ static void email_app_render_detail(void)
             break;
         }
         if (logical >= email_app.detail_scroll) {
-            email_app_cell(1U + logical - email_app.detail_scroll,
+            solar_os_tui_write_cell(&email_app.tui, 1U + logical - email_app.detail_scroll,
                            0,
                            cols,
                            line,
@@ -337,11 +287,8 @@ static void email_app_render_detail(void)
         logical++;
     }
     if (rows > 0) {
-        email_app_cell(rows - 1U,
-                       0,
-                       cols,
-                       "Left back  arrows scroll  m unread  q quit",
-                       SOLAR_OS_TUI_ATTR_INVERSE);
+        solar_os_tui_draw_help(&email_app.tui,
+                               "Left back  arrows scroll  m unread  q quit");
     }
 }
 
@@ -352,7 +299,7 @@ static void email_app_render(void)
     solar_os_tui_set_cursor_visible(&email_app.tui, false);
     solar_os_tui_clear(&email_app.tui);
     if (rows < 3U || cols < 12U) {
-        email_app_cell(0, 0, cols, "email: terminal too small", SOLAR_OS_TUI_ATTR_NORMAL);
+        solar_os_tui_draw_too_small(&email_app.tui, "email");
     } else if (email_app.view == EMAIL_APP_DETAIL) {
         email_app_render_detail();
     } else {
@@ -423,13 +370,12 @@ static esp_err_t email_app_start(solar_os_context_t *ctx)
     if (email_app.messages == NULL) {
         return ESP_ERR_NO_MEM;
     }
-    esp_err_t err = solar_os_tui_begin(&email_app.tui, ctx);
+    esp_err_t err = solar_os_tui_screen_begin(&email_app.tui, ctx);
     if (err != ESP_OK) {
         solar_os_memory_free(email_app.messages);
         memset(&email_app, 0, sizeof(email_app));
         return err;
     }
-    (void)solar_os_tui_enable_diff(&email_app.tui, true);
     email_app_refresh();
     email_app_render();
     return ESP_OK;

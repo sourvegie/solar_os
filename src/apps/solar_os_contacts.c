@@ -15,6 +15,7 @@
 #include "solar_os_memory.h"
 #include "solar_os_terminal.h"
 #include "solar_os_tui.h"
+#include "solar_os_tui_widgets.h"
 
 #define CONTACTS_APP_LINE_MAX (SOLAR_OS_TERMINAL_MAX_COLS * 4U + 1U)
 
@@ -39,61 +40,6 @@ typedef struct {
 
 static void *contacts_app_state;
 #define contacts_app (*(contacts_app_state_t *)contacts_app_state)
-
-static size_t contacts_app_utf8_char_len(const char *text)
-{
-    if (text == NULL || text[0] == '\0') {
-        return 0U;
-    }
-    const unsigned char ch = (unsigned char)text[0];
-    if (ch < 0x80U) {
-        return 1U;
-    }
-    if ((ch & 0xe0U) == 0xc0U && text[1] != '\0') {
-        return 2U;
-    }
-    if ((ch & 0xf0U) == 0xe0U && text[1] != '\0' && text[2] != '\0') {
-        return 3U;
-    }
-    if ((ch & 0xf8U) == 0xf0U && text[1] != '\0' &&
-        text[2] != '\0' && text[3] != '\0') {
-        return 4U;
-    }
-    return 1U;
-}
-
-static void contacts_app_write_cell(size_t row,
-                                    size_t col,
-                                    size_t width,
-                                    const char *text,
-                                    uint8_t attr)
-{
-    const size_t rows = solar_os_tui_rows(&contacts_app.tui);
-    const size_t cols = solar_os_tui_cols(&contacts_app.tui);
-    char clipped[CONTACTS_APP_LINE_MAX];
-    if (row >= rows || col >= cols || width == 0U) {
-        return;
-    }
-    if (col + width > cols) {
-        width = cols - col;
-    }
-    solar_os_tui_fill(&contacts_app.tui, row, col, 1U, width, ' ', attr);
-    size_t bytes = 0U;
-    size_t cells = 0U;
-    while (text != NULL && text[bytes] != '\0' && cells < width) {
-        const size_t length = contacts_app_utf8_char_len(text + bytes);
-        if (length == 0U || bytes + length >= sizeof(clipped)) {
-            break;
-        }
-        memcpy(clipped + bytes, text + bytes, length);
-        bytes += length;
-        cells++;
-    }
-    clipped[bytes] = '\0';
-    if (bytes > 0U) {
-        solar_os_tui_addstr(&contacts_app.tui, row, col, clipped, attr);
-    }
-}
 
 static int contacts_app_compare(const void *first_value,
                                 const void *second_value)
@@ -193,14 +139,13 @@ static size_t contacts_app_visible_rows(void)
 
 static void contacts_app_ensure_visible(void)
 {
-    const size_t rows = contacts_app_visible_rows();
-    if (rows == 0U || contacts_app.visible_count == 0U) {
-        contacts_app.top = 0U;
-    } else if (contacts_app.cursor < contacts_app.top) {
-        contacts_app.top = contacts_app.cursor;
-    } else if (contacts_app.cursor >= contacts_app.top + rows) {
-        contacts_app.top = contacts_app.cursor - rows + 1U;
-    }
+    solar_os_tui_viewport_t viewport = {
+        .cursor = contacts_app.cursor, .top = contacts_app.top,
+    };
+    solar_os_tui_viewport_reconcile(&viewport, contacts_app.visible_count,
+                                    contacts_app_visible_rows());
+    contacts_app.cursor = viewport.cursor;
+    contacts_app.top = viewport.top;
 }
 
 static char contacts_app_trust_marker(solar_os_contact_trust_t trust)
@@ -229,18 +174,13 @@ static void contacts_app_render_list(void)
              (unsigned)contacts_app.visible_count,
              contacts_app.search[0] != '\0' ? "  /" : "",
              contacts_app.search);
-    contacts_app_write_cell(0U,
-                            0U,
-                            cols,
-                            line,
-                            SOLAR_OS_TUI_ATTR_INVERSE |
-                                SOLAR_OS_TUI_ATTR_BOLD);
+    solar_os_tui_draw_title(&contacts_app.tui, line, NULL);
 
     const size_t visible_rows = contacts_app_visible_rows();
     for (size_t row = 0U; row < visible_rows; row++) {
         const size_t visible_index = contacts_app.top + row;
         if (visible_index >= contacts_app.visible_count) {
-            contacts_app_write_cell(
+            solar_os_tui_write_cell(&contacts_app.tui,
                 row + 1U,
                 0U,
                 cols,
@@ -259,7 +199,7 @@ static void contacts_app_render_list(void)
                  solar_os_messaging_provider_name(contact->primary_provider),
                  contact->display_name,
                  (unsigned)contact->endpoint_count);
-        contacts_app_write_cell(
+        solar_os_tui_write_cell(&contacts_app.tui,
             row + 1U,
             0U,
             cols,
@@ -274,11 +214,7 @@ static void contacts_app_render_list(void)
                     "Search: /%s  Enter accept  Esc clear" :
                     "Enter details  / search  q quit",
                  contacts_app.search);
-        contacts_app_write_cell(rows - 1U,
-                                0U,
-                                cols,
-                                line,
-                                SOLAR_OS_TUI_ATTR_INVERSE);
+        solar_os_tui_draw_help(&contacts_app.tui, line);
     }
 }
 
@@ -315,12 +251,8 @@ static void contacts_app_render_detail(void)
     const size_t cols = solar_os_tui_cols(&contacts_app.tui);
     char line_text[CONTACTS_APP_LINE_MAX];
 
-    contacts_app_write_cell(0U,
-                            0U,
-                            cols,
-                            contacts_app.selected.display_name,
-                            SOLAR_OS_TUI_ATTR_INVERSE |
-                                SOLAR_OS_TUI_ATTR_BOLD);
+    solar_os_tui_draw_title(&contacts_app.tui,
+                            contacts_app.selected.display_name, NULL);
     const size_t visible = contacts_app_visible_rows();
     for (size_t row = 0U; row < visible; row++) {
         const size_t line = contacts_app.detail_scroll + row;
@@ -379,18 +311,15 @@ static void contacts_app_render_detail(void)
                          (unsigned)endpoint->provider_metadata_len);
             }
         }
-        contacts_app_write_cell(row + 1U,
+        solar_os_tui_write_cell(&contacts_app.tui, row + 1U,
                                 0U,
                                 cols,
                                 line_text,
                                 SOLAR_OS_TUI_ATTR_NORMAL);
     }
     if (rows > 0U) {
-        contacts_app_write_cell(rows - 1U,
-                                0U,
-                                cols,
-                                "Up/Down scroll  Esc back  q quit",
-                                SOLAR_OS_TUI_ATTR_INVERSE);
+        solar_os_tui_draw_help(&contacts_app.tui,
+                               "Up/Down scroll  Esc back  q quit");
     }
 }
 
@@ -444,14 +373,13 @@ static esp_err_t contacts_app_start(solar_os_context_t *ctx)
         memset(&contacts_app, 0, sizeof(contacts_app));
         return ESP_ERR_NO_MEM;
     }
-    error = solar_os_tui_begin(&contacts_app.tui, ctx);
+    error = solar_os_tui_screen_begin(&contacts_app.tui, ctx);
     if (error != ESP_OK) {
         solar_os_memory_free(contacts_app.contacts);
         solar_os_memory_free(contacts_app.endpoints);
         memset(&contacts_app, 0, sizeof(contacts_app));
         return error;
     }
-    (void)solar_os_tui_enable_diff(&contacts_app.tui, true);
     contacts_app_refresh();
     contacts_app_render();
     return ESP_OK;

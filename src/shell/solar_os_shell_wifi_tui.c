@@ -10,6 +10,7 @@
 #include "esp_err.h"
 #include "solar_os_keys.h"
 #include "solar_os_tui.h"
+#include "solar_os_tui_widgets.h"
 #include "solar_os_wifi.h"
 
 #define WIFI_TUI_STATUS_MAX 96
@@ -64,32 +65,6 @@ static size_t wifi_tui_visible_width(size_t cols, size_t start_col)
 static void wifi_tui_set_status(const char *status)
 {
     strlcpy(wifi_tui.status, status != NULL ? status : "", sizeof(wifi_tui.status));
-}
-
-static void wifi_tui_write_cell(size_t row,
-                                size_t col,
-                                size_t width,
-                                const char *text,
-                                uint8_t attr)
-{
-    char clipped[WIFI_TUI_STATUS_MAX];
-    size_t len = 0;
-
-    if (width == 0) {
-        return;
-    }
-
-    solar_os_tui_fill(&wifi_tui.tui, row, col, 1, width, ' ', attr);
-    if (text == NULL || text[0] == '\0') {
-        return;
-    }
-
-    while (text[len] != '\0' && len + 1 < sizeof(clipped) && len < width) {
-        clipped[len] = text[len];
-        len++;
-    }
-    clipped[len] = '\0';
-    solar_os_tui_addstr(&wifi_tui.tui, row, col, clipped, attr);
 }
 
 static void wifi_tui_nat_value(const solar_os_wifi_status_t *status,
@@ -197,7 +172,7 @@ static void wifi_tui_render_scan(size_t start_row, size_t rows, size_t cols)
         return;
     }
 
-    wifi_tui_write_cell(start_row,
+    solar_os_tui_write_cell(&wifi_tui.tui, start_row,
                         0,
                         cols,
                         wifi_tui.scan_count == 0 ? "scan: no networks" : "scan: rssi ch auth k ssid",
@@ -215,7 +190,7 @@ static void wifi_tui_render_scan(size_t start_row, size_t rows, size_t cols)
                  wifi_tui.scan_aps[i].auth,
                  known ? '*' : '-',
                  wifi_tui.scan_aps[i].ssid);
-        wifi_tui_write_cell(start_row + i + 1, 0, cols, line, SOLAR_OS_TUI_ATTR_NORMAL);
+        solar_os_tui_write_cell(&wifi_tui.tui, start_row + i + 1, 0, cols, line, SOLAR_OS_TUI_ATTR_NORMAL);
     }
 }
 
@@ -241,14 +216,14 @@ static void wifi_tui_render(void)
         split = cols > 2 ? cols / 2 : 1;
     }
 
-    wifi_tui_write_cell(0,
+    solar_os_tui_write_cell(&wifi_tui.tui, 0,
                         0,
                         split,
                         "wifi",
                         SOLAR_OS_TUI_ATTR_BOLD | SOLAR_OS_TUI_ATTR_INVERSE);
     if (cols > split) {
         solar_os_tui_vrule(tui, 0, split, rows, 1, SOLAR_OS_TUI_ATTR_NORMAL);
-        wifi_tui_write_cell(0,
+        solar_os_tui_write_cell(&wifi_tui.tui, 0,
                             split + 1,
                             wifi_tui_visible_width(cols, split + 1),
                             "value",
@@ -268,9 +243,9 @@ static void wifi_tui_render(void)
         }
 
         wifi_tui_current_value((wifi_tui_item_t)i, &status, value, sizeof(value));
-        wifi_tui_write_cell(i + 1, 0, split, wifi_tui_items[i].label, label_attr);
+        solar_os_tui_write_cell(&wifi_tui.tui, i + 1, 0, split, wifi_tui_items[i].label, label_attr);
         if (value_width > 0) {
-            wifi_tui_write_cell(i + 1, value_col, value_width, value, value_attr);
+            solar_os_tui_write_cell(&wifi_tui.tui, i + 1, value_col, value_width, value, value_attr);
         }
     }
 
@@ -280,8 +255,11 @@ static void wifi_tui_render(void)
         wifi_tui_render_scan(scan_row, status_row, cols);
     }
 
-    if (wifi_tui.status[0] != '\0' && rows > 1) {
-        wifi_tui_write_cell(status_row, 0, cols, wifi_tui.status, SOLAR_OS_TUI_ATTR_INVERSE);
+    if (rows > 1) {
+        solar_os_tui_draw_help(
+            &wifi_tui.tui,
+            wifi_tui.status[0] != '\0' ? wifi_tui.status :
+                "arrows select/change  enter apply  esc exits");
     }
 
     solar_os_tui_set_cursor_visible(tui, false);
@@ -425,11 +403,10 @@ static esp_err_t wifi_tui_start(solar_os_context_t *ctx)
 {
     memset(&wifi_tui, 0, sizeof(wifi_tui));
     wifi_tui.ctx = ctx;
-    const esp_err_t err = solar_os_tui_begin(&wifi_tui.tui, ctx);
+    const esp_err_t err = solar_os_tui_screen_begin(&wifi_tui.tui, ctx);
     if (err != ESP_OK) {
         return err;
     }
-    (void)solar_os_tui_enable_diff(&wifi_tui.tui, true);
     wifi_tui_set_status("enter acts, esc exits");
     solar_os_tui_set_cursor_visible(&wifi_tui.tui, false);
     wifi_tui_render();

@@ -9,32 +9,23 @@ packages_any = ["app_lua"]
 +++
 # Lua text user-interface API
 
-Use `solaros.tui` for text applications that should share one interface across
-the display terminal and cursor-addressable port shells.
-
-## Minimal application
+Use the shared layout on displays and cursor-addressable port shells:
 
 ```lua
 local tui = solaros.tui
-
-while not solaros.should_exit() do
-    tui.clear()
-    tui.move(0, 0)
-    tui.addstr("SolarOS TUI", tui.BOLD)
-    tui.move(2, 0)
-    tui.addstr("Press the app-exit key to leave")
-    tui.refresh()
-    tui.getch()
-end
+local _, _, body = table.unpack(tui.layout())
+tui.title("Example")
+tui.cell(body[1], 0, body[4], "Shared layout")
+tui.help("Enter open  Esc exit")
 ```
-
-Use `rows`, `cols`, or `size` to adapt the layout. Check
-`solaros.should_exit()` so the foreground session can close cleanly.
 
 ## Quick reference
 
-Lua: local tui = solaros.tui. Functions are rows, cols, size, clear, refresh,
-move, write, addstr, putch, hline, vline, vrule, box, fill, and getch.
-Attributes are NORMAL, BOLD, INVERSE; key constants include KEY_ESCAPE and
-navigation keys. Loop while not solaros.should_exit() for an interactive
-foreground app.
+High-level: layout, cell, title, help, tab, list_move, input_edit, input.
+Rectangles are `{row, col, height, width}`. The low-level API remains.
+
+`input(row, col, width, label, text, cursor, view[, attr[, masked]])` draws an
+editable input row. Set `masked` to `true` to draw one `*` per UTF-8 character.
+The mask is render-only: `text` and the value returned by `input_edit()` remain
+unchanged, so a script must still avoid logging secrets and discard them when
+they are no longer needed.

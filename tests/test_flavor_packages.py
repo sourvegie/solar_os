@@ -26,6 +26,12 @@ class FlavorPackagesTest(unittest.TestCase):
             self.catalog,
         )
 
+    def test_invaders_disabled_in_all_flavors(self):
+        for flavor_path in sorted((REPOSITORY / "flavors").glob("*.toml")):
+            _, _, groups, packages = self.resolve(flavor_path.stem)
+            self.assertFalse(groups["games"], flavor_path.stem)
+            self.assertFalse(packages["app_invaders"], flavor_path.stem)
+
     def test_granular_group_ownership(self):
         self.assertEqual(
             set(self.catalog.group_defs["maintenance_jobs"].members),
@@ -138,6 +144,19 @@ class FlavorPackagesTest(unittest.TestCase):
             self.catalog.package_defs["service_espnow"].depends,
             ("service_wifi",),
         )
+        self.assertIn("service_wireguard", self.catalog.group_defs["net"].members)
+        self.assertEqual(
+            self.catalog.package_defs["service_wireguard"].depends,
+            ("service_wifi",),
+        )
+        self.assertEqual(
+            self.catalog.package_defs["service_wireguard"].capabilities,
+            ("wifi",),
+        )
+        self.assertIn(
+            "wireguard_lwip",
+            self.catalog.package_defs["service_wireguard"].requires,
+        )
         self.assertEqual(
             self.catalog.package_defs["job_espnow_link"].depends,
             ("service_espnow", "service_inbox", "service_link"),
@@ -166,6 +185,9 @@ class FlavorPackagesTest(unittest.TestCase):
             "job_bridge",
             "job_daq",
             "job_sump",
+            "service_script_net",
+            "app_python",
+            "app_lua",
             "app_clock",
             "app_calc",
             "app_plot",
@@ -197,6 +219,7 @@ class FlavorPackagesTest(unittest.TestCase):
             self.assertTrue(pruned[package], package)
         self.assertFalse(pruned["service_audio_board"])
         self.assertFalse(pruned["service_espnow"])
+        self.assertFalse(pruned["service_wireguard"])
         self.assertFalse(pruned["job_espnow_link"])
 
     def test_webradio_survives_on_wifi_board_without_builtin_audio(self):
@@ -219,6 +242,7 @@ class FlavorPackagesTest(unittest.TestCase):
             "app_funcgen",
             "app_webradio",
             "service_espnow",
+            "service_wireguard",
             "job_espnow_link",
         ):
             self.assertTrue(pruned[package], package)
@@ -325,8 +349,8 @@ class FlavorPackagesTest(unittest.TestCase):
             ):
                 self.assertFalse(packages[audio_app], audio_app)
 
-        self.assertTrue(rover_groups["games"])
-        self.assertTrue(rover_packages["app_invaders"])
+        self.assertFalse(rover_groups["games"])
+        self.assertFalse(rover_packages["app_invaders"])
         self.assertFalse(rover_packages["app_python"])
         self.assertFalse(rover_packages["app_lua"])
         self.assertFalse(python_groups["games"])
@@ -353,8 +377,8 @@ class FlavorPackagesTest(unittest.TestCase):
         self.assertEqual(
             python_difference,
             {
-                "app_invaders",
                 "service_playground",
+                "service_script_net",
                 "service_script_runner",
                 "app_python",
                 "app_playground",
@@ -366,8 +390,8 @@ class FlavorPackagesTest(unittest.TestCase):
         self.assertEqual(
             lua_difference,
             {
-                "app_invaders",
                 "service_playground",
+                "service_script_net",
                 "service_script_runner",
                 "app_lua",
                 "app_playground",

@@ -26,7 +26,12 @@ Local audit patches:
   `MESHCORE_SOLAROS` build definition as SolarOS does not define Arduino's
   global `ESP32` macro;
 - allocation and radio ownership live in the SolarOS adapter, outside this
-  upstream subtree.
+  upstream subtree;
+- `Dispatcher.h` includes `"Packet.h"` rather than `<Packet.h>` so the
+  sibling header always wins. The libssh2 component publishes its private
+  `libssh2/src` directory on the global include path, and on case-insensitive
+  filesystems (macOS APFS) `<Packet.h>` otherwise resolves to libssh2's
+  `packet.h`.
 
 Upstream updates are explicit dependency bumps: replace the audited files,
 review the local patches, update the pinned hash above, and run the MeshCore

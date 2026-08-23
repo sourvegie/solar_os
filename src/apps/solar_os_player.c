@@ -25,6 +25,7 @@
 #include "solar_os_storage_browser.h"
 #include "solar_os_task.h"
 #include "solar_os_tui.h"
+#include "solar_os_tui_widgets.h"
 
 #define PLAYER_TASK_STACK 28672U
 #define PLAYER_TASK_PRIORITY (tskIDLE_PRIORITY + 2U)
@@ -443,28 +444,19 @@ static const char *player_state_symbol(void)
     return "[]";
 }
 
-static void player_clip(char *destination, size_t destination_len,
-                        const char *source, size_t width)
-{
-    const size_t limit = width < destination_len - 1U ? width :
-        destination_len - 1U;
-    const size_t length = strnlen(source != NULL ? source : "", limit);
-    memcpy(destination, source != NULL ? source : "", length);
-    destination[length] = '\0';
-}
-
 static void player_render_tui(void)
 {
     const size_t rows = solar_os_tui_rows(&player.tui);
     const size_t cols = solar_os_tui_cols(&player.tui);
-    if (rows < 5U || cols < 20U) return;
+    if (rows < 5U || cols < 20U) {
+        solar_os_tui_draw_too_small(&player.tui, "player");
+        solar_os_tui_refresh(&player.tui);
+        return;
+    }
     solar_os_tui_clear(&player.tui);
-    solar_os_tui_fill(&player.tui, 0U, 0U, 1U, cols, ' ',
-                      SOLAR_OS_TUI_ATTR_INVERSE | SOLAR_OS_TUI_ATTR_BOLD);
-    solar_os_tui_addstr(&player.tui, 0U, 1U,
-                        player.browsing ? "Player - Add track" : "Player",
-                        SOLAR_OS_TUI_ATTR_INVERSE | SOLAR_OS_TUI_ATTR_BOLD);
-    char clipped[192];
+    solar_os_tui_draw_title(&player.tui,
+                            player.browsing ? "Player - Add track" : "Player",
+                            NULL);
     size_t count = player.browsing ? solar_os_storage_browser_count(player.browser) :
         player.track_count;
     size_t cursor = player.browsing ? solar_os_storage_browser_cursor(player.browser) :
@@ -488,10 +480,10 @@ static void player_render_tui(void)
                      player.task != NULL && index == player.active_index ? '*' : ' ',
                      player_basename(track.path));
         }
-        player_clip(clipped, sizeof(clipped), line, cols > 2U ? cols - 2U : 0U);
-        solar_os_tui_addstr(&player.tui, row + 1U, 1U, clipped,
-                            index == cursor ? SOLAR_OS_TUI_ATTR_INVERSE :
-                                              SOLAR_OS_TUI_ATTR_NORMAL);
+        solar_os_tui_write_cell(
+            &player.tui, row + 1U, 1U, cols > 2U ? cols - 2U : 0U, line,
+            index == cursor ? SOLAR_OS_TUI_ATTR_INVERSE :
+                              SOLAR_OS_TUI_ATTR_NORMAL);
     }
     char elapsed[12], total[12], status[192];
     player_format_time(player.elapsed_ms, true, elapsed, sizeof(elapsed));
@@ -505,9 +497,7 @@ static void player_render_tui(void)
         snprintf(status, sizeof(status), "%s %s / %s | Up/Down  Enter play/stop  Space pause  A add  Del remove  Esc exit",
                  player_state_symbol(), elapsed, total);
     }
-    player_clip(clipped, sizeof(clipped), status, cols > 2U ? cols - 2U : 0U);
-    solar_os_tui_addstr(&player.tui, rows - 1U, 1U, clipped,
-                        SOLAR_OS_TUI_ATTR_BOLD);
+    solar_os_tui_draw_help(&player.tui, status);
     solar_os_tui_set_cursor_visible(&player.tui, false);
     solar_os_tui_refresh(&player.tui);
 }
@@ -807,8 +797,7 @@ static esp_err_t player_start(solar_os_context_t *ctx)
     player.mode = !force_tui && player_graphical_session(ctx) ?
         PLAYER_MODE_GRAPHICS : PLAYER_MODE_TUI;
     if (player.mode == PLAYER_MODE_TUI) {
-        err = solar_os_tui_begin(&player.tui, ctx);
-        if (err == ESP_OK) (void)solar_os_tui_enable_diff(&player.tui, true);
+        err = solar_os_tui_screen_begin(&player.tui, ctx);
     } else {
         err = solar_os_cassette_widget_create(&player.cassette);
         if (err == ESP_OK) err = solar_os_oscilloscope_widget_create(

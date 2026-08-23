@@ -1,6 +1,5 @@
 #include "solar_os_notes.h"
 
-#include <ctype.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -14,6 +13,7 @@
 #include "solar_os_memory.h"
 #include "solar_os_storage.h"
 #include "solar_os_tui.h"
+#include "solar_os_tui_widgets.h"
 
 #define NOTES_DEFAULT_PATH "/.notes/default.md"
 #define NOTES_DEFAULT_DIR "/.notes"
@@ -25,6 +25,11 @@
 #define NOTES_LINE_MAX 192U
 #define NOTES_MESSAGE_MAX 96U
 #define NOTES_PREAMBLE_VISIBLE_MAX 3U
+#define NOTES_FOOTER_ROWS 2U
+#define NOTES_HELP_TEXT \
+    "SPACE done  t tidy  SHIFT+UP/DN move  a add  c cat  d del  q quit"
+#define NOTES_INPUT_HELP_TEXT \
+    "ENTER save  ESC cancel  LEFT/RIGHT move"
 
 typedef enum {
     NOTES_INPUT_NONE,
@@ -502,10 +507,10 @@ static size_t notes_preamble_visible_rows(size_t body_rows)
 static size_t notes_list_rows(void)
 {
     const size_t rows = solar_os_tui_rows(&notes.tui);
-    if (rows <= 3) {
+    if (rows <= 1U + NOTES_FOOTER_ROWS) {
         return 0;
     }
-    const size_t body = rows - 2U;
+    const size_t body = rows - 1U - NOTES_FOOTER_ROWS;
     const size_t preamble_rows = notes_preamble_visible_rows(body);
     return body > preamble_rows ? body - preamble_rows : 0;
 }
@@ -529,145 +534,10 @@ static void notes_ensure_visible(void)
     }
 }
 
-static size_t notes_utf8_char_len(unsigned char ch)
-{
-    if (ch < 0x80U) {
-        return 1;
-    }
-    if ((ch & 0xe0U) == 0xc0U) {
-        return 2;
-    }
-    if ((ch & 0xf0U) == 0xe0U) {
-        return 3;
-    }
-    if ((ch & 0xf8U) == 0xf0U) {
-        return 4;
-    }
-    return 1;
-}
-
-static bool notes_utf8_continuation(char ch)
-{
-    return ((uint8_t)ch & 0xc0U) == 0x80U;
-}
-
-static size_t notes_utf8_prev(const char *text, size_t offset)
-{
-    if (text == NULL || offset == 0) {
-        return 0;
-    }
-    offset--;
-    while (offset > 0 && notes_utf8_continuation(text[offset])) {
-        offset--;
-    }
-    return offset;
-}
-
-static size_t notes_utf8_next(const char *text, size_t len, size_t offset)
-{
-    if (text == NULL || offset >= len) {
-        return len;
-    }
-    offset++;
-    while (offset < len && notes_utf8_continuation(text[offset])) {
-        offset++;
-    }
-    return offset;
-}
-
-static size_t notes_utf8_count(const char *text, size_t start, size_t end)
-{
-    size_t count = 0;
-    for (size_t offset = start; text != NULL && offset < end; count++) {
-        offset = notes_utf8_next(text, end, offset);
-    }
-    return count;
-}
-
-static void notes_clip_text(const char *text, size_t cells, char *out, size_t out_len)
-{
-    if (out == NULL || out_len == 0) {
-        return;
-    }
-    out[0] = '\0';
-    if (text == NULL || cells == 0) {
-        return;
-    }
-
-    size_t in = 0;
-    size_t out_pos = 0;
-    size_t used_cells = 0;
-    while (text[in] != '\0' && used_cells < cells && out_pos + 1U < out_len) {
-        size_t char_len = notes_utf8_char_len((unsigned char)text[in]);
-        if (char_len == 0 || out_pos + char_len >= out_len) {
-            break;
-        }
-        for (size_t i = 1; i < char_len; i++) {
-            if (((unsigned char)text[in + i] & 0xc0U) != 0x80U) {
-                char_len = 1;
-                break;
-            }
-        }
-        memcpy(&out[out_pos], &text[in], char_len);
-        out_pos += char_len;
-        in += char_len;
-        used_cells++;
-    }
-    out[out_pos] = '\0';
-}
-
-static void notes_write_cell(size_t row,
-                             size_t col,
-                             size_t width,
-                             const char *text,
-                             uint8_t attr)
-{
-    const size_t rows = solar_os_tui_rows(&notes.tui);
-    const size_t cols = solar_os_tui_cols(&notes.tui);
-    char clipped[NOTES_LINE_MAX];
-
-    if (row >= rows || col >= cols || width == 0) {
-        return;
-    }
-    if (col + width > cols) {
-        width = cols - col;
-    }
-    if (width == 0) {
-        return;
-    }
-
-    solar_os_tui_fill(&notes.tui, row, col, 1, width, ' ', attr);
-    notes_clip_text(text, width, clipped, sizeof(clipped));
-    if (clipped[0] != '\0') {
-        solar_os_tui_addstr(&notes.tui, row, col, clipped, attr);
-    }
-}
-
-static void notes_input_ensure_visible(size_t width)
-{
-    if (width == 0) {
-        notes.input_view_offset = notes.input_cursor;
-        return;
-    }
-    if (notes.input_cursor < notes.input_view_offset) {
-        notes.input_view_offset = notes.input_cursor;
-    } else {
-        size_t cursor_col = notes_utf8_count(notes.input,
-                                             notes.input_view_offset,
-                                             notes.input_cursor);
-        while (cursor_col >= width && notes.input_view_offset < notes.input_cursor) {
-            notes.input_view_offset = notes_utf8_next(notes.input,
-                                                      notes.input_len,
-                                                      notes.input_view_offset);
-            cursor_col--;
-        }
-    }
-}
-
 static void notes_render_row(const notes_view_row_t *view, size_t row_index, size_t cols)
 {
     if (view == NULL) {
-        notes_write_cell(row_index, 0, cols, "", SOLAR_OS_TUI_ATTR_NORMAL);
+        solar_os_tui_write_cell(&notes.tui, row_index, 0, cols, "", SOLAR_OS_TUI_ATTR_NORMAL);
         return;
     }
 
@@ -680,13 +550,13 @@ static void notes_render_row(const notes_view_row_t *view, size_t row_index, siz
         const char marker = cat->collapsed ? '+' : '-';
         snprintf(line, sizeof(line), "%c %s", marker, cat->text);
         attr |= SOLAR_OS_TUI_ATTR_BOLD;
-        notes_write_cell(row_index, 0, cols, line, attr);
+        solar_os_tui_write_cell(&notes.tui, row_index, 0, cols, line, attr);
         return;
     }
 
     if (view->type == NOTES_VIEW_SEPARATOR) {
         const notes_category_t *cat = &notes.categories[view->category];
-        notes_write_cell(row_index,
+        solar_os_tui_write_cell(&notes.tui, row_index,
                          0,
                          cols,
                          notes_category_visible(cat) ? "  ---- done ----" : "---- done ----",
@@ -703,7 +573,7 @@ static void notes_render_row(const notes_view_row_t *view, size_t row_index, siz
                  notes_category_visible(cat) ? "  " : "",
                  item->checked ? 'x' : ' ',
                  item->text);
-        notes_write_cell(row_index, 0, cols, line, attr);
+        solar_os_tui_write_cell(&notes.tui, row_index, 0, cols, line, attr);
     }
 }
 
@@ -721,6 +591,15 @@ static const char *notes_input_label(void)
     default:
         return "";
     }
+}
+
+static const char *notes_help_text(void)
+{
+    if (notes.error_only) {
+        return "q quit";
+    }
+    return notes.input_mode != NOTES_INPUT_NONE ?
+        NOTES_INPUT_HELP_TEXT : NOTES_HELP_TEXT;
 }
 
 static void notes_render(solar_os_context_t *ctx)
@@ -744,46 +623,52 @@ static void notes_render(solar_os_context_t *ctx)
              "notes %s%s",
              notes.display_name[0] ? notes.display_name : notes.path,
              notes.error_only ? "" : "");
-    notes_write_cell(0, 0, cols, title, SOLAR_OS_TUI_ATTR_INVERSE);
+    solar_os_tui_draw_title(&notes.tui, title, NULL);
+
+    if (rows <= 1U) {
+        solar_os_tui_refresh(&notes.tui);
+        return;
+    }
+    if (rows <= 1U + NOTES_FOOTER_ROWS) {
+        solar_os_tui_draw_help(&notes.tui, notes_help_text());
+        solar_os_tui_refresh(&notes.tui);
+        return;
+    }
 
     size_t row = 1;
-    const size_t body_rows = rows > 2 ? rows - 2U : 0U;
+    const size_t detail_row = rows - NOTES_FOOTER_ROWS;
+    const size_t body_rows = rows - 1U - NOTES_FOOTER_ROWS;
     const size_t preamble_rows = notes_preamble_visible_rows(body_rows);
-    for (size_t i = 0; i < preamble_rows && row + 1U < rows; i++, row++) {
-        notes_write_cell(row, 0, cols, notes.preamble[i], SOLAR_OS_TUI_ATTR_NORMAL);
+    for (size_t i = 0; i < preamble_rows && row < detail_row; i++, row++) {
+        solar_os_tui_write_cell(&notes.tui, row, 0, cols, notes.preamble[i], SOLAR_OS_TUI_ATTR_NORMAL);
     }
 
-    if (notes.view_count == 0 && !notes.error_only && row + 1U < rows) {
-        notes_write_cell(row, 0, cols, "No checklist items", SOLAR_OS_TUI_ATTR_NORMAL);
+    if (notes.view_count == 0 && !notes.error_only && row < detail_row) {
+        solar_os_tui_write_cell(&notes.tui, row, 0, cols, "No checklist items", SOLAR_OS_TUI_ATTR_NORMAL);
     }
 
-    const size_t list_rows = rows > row + 1U ? rows - row - 1U : 0U;
+    const size_t list_rows = detail_row > row ? detail_row - row : 0U;
     for (size_t visible = 0; visible < list_rows && notes.top + visible < notes.view_count; visible++) {
         notes_render_row(&notes.view[notes.top + visible], row + visible, cols);
     }
 
+    solar_os_tui_draw_help(&notes.tui, notes_help_text());
     if (notes.input_mode != NOTES_INPUT_NONE) {
         const char *label = notes_input_label();
-        const size_t label_len = strlen(label);
-        const size_t input_width = cols > label_len ? cols - label_len : 0U;
-        notes_input_ensure_visible(input_width);
-        notes_write_cell(rows - 1U, 0, cols, "", SOLAR_OS_TUI_ATTR_NORMAL);
-        notes_write_cell(rows - 1U, 0, label_len, label, SOLAR_OS_TUI_ATTR_NORMAL);
-        notes_write_cell(rows - 1U,
-                         label_len,
-                         input_width,
-                         &notes.input[notes.input_view_offset],
-                         SOLAR_OS_TUI_ATTR_NORMAL);
-        const size_t cursor_col =
-            label_len + (notes.input_cursor >= notes.input_view_offset ?
-                notes_utf8_count(notes.input,
-                                 notes.input_view_offset,
-                                 notes.input_cursor) :
-                0U);
-        solar_os_tui_move(&notes.tui, rows - 1U, cursor_col < cols ? cursor_col : cols - 1U);
-        solar_os_tui_set_cursor_visible(&notes.tui, true);
+        solar_os_tui_input_state_t input_state = {
+            .cursor = notes.input_cursor,
+            .view = notes.input_view_offset,
+        };
+        solar_os_tui_draw_input(&notes.tui, detail_row, 0, cols, label,
+                                notes.input, &input_state,
+                                SOLAR_OS_TUI_ATTR_NORMAL);
+        notes.input_view_offset = input_state.view;
     } else {
-        notes_write_cell(rows - 1U, 0, cols, notes.message, SOLAR_OS_TUI_ATTR_NORMAL);
+        solar_os_tui_write_cell(&notes.tui, detail_row,
+                         0,
+                         cols,
+                         notes.message,
+                         SOLAR_OS_TUI_ATTR_NORMAL);
     }
     solar_os_tui_refresh(&notes.tui);
 }
@@ -1041,11 +926,6 @@ static void notes_start_edit(void)
     notes.input_cursor = notes.input_len;
 }
 
-static bool notes_is_printable(uint8_t ch)
-{
-    return isprint(ch) || ch >= 0xa0;
-}
-
 static void notes_finish_input(void)
 {
     notes_select_kind_t keep_kind = NOTES_SELECT_NONE;
@@ -1121,145 +1001,26 @@ static void notes_cancel_input(void)
     notes_set_message("cancelled");
 }
 
-static bool notes_input_word_char(char ch)
+static bool notes_handle_input(uint32_t ch)
 {
-    const unsigned char value = (unsigned char)ch;
-    return value >= 0x80U || !isspace(value);
-}
-
-static void notes_input_word_left(void)
-{
-    size_t pos = notes.input_cursor;
-    while (pos > 0) {
-        const size_t previous = notes_utf8_prev(notes.input, pos);
-        if (!isspace((unsigned char)notes.input[previous])) {
-            break;
-        }
-        pos = previous;
-    }
-    while (pos > 0) {
-        const size_t previous = notes_utf8_prev(notes.input, pos);
-        if (!notes_input_word_char(notes.input[previous])) {
-            break;
-        }
-        pos = previous;
-    }
-    notes.input_cursor = pos;
-}
-
-static void notes_input_word_right(void)
-{
-    size_t pos = notes.input_cursor;
-    while (pos < notes.input_len && notes_input_word_char(notes.input[pos])) {
-        pos = notes_utf8_next(notes.input, notes.input_len, pos);
-    }
-    while (pos < notes.input_len && isspace((unsigned char)notes.input[pos])) {
-        pos = notes_utf8_next(notes.input, notes.input_len, pos);
-    }
-    notes.input_cursor = pos;
-}
-
-static void notes_input_backspace(void)
-{
-    if (notes.input_cursor == 0 || notes.input_len == 0) {
-        return;
-    }
-    const size_t previous = notes_utf8_prev(notes.input, notes.input_cursor);
-    const size_t removed = notes.input_cursor - previous;
-    memmove(&notes.input[previous],
-            &notes.input[notes.input_cursor],
-            notes.input_len - notes.input_cursor + 1U);
-    notes.input_cursor = previous;
-    notes.input_len -= removed;
-}
-
-static void notes_input_delete(void)
-{
-    if (notes.input_cursor >= notes.input_len) {
-        return;
-    }
-    const size_t next = notes_utf8_next(notes.input,
-                                        notes.input_len,
-                                        notes.input_cursor);
-    const size_t removed = next - notes.input_cursor;
-    memmove(&notes.input[notes.input_cursor],
-            &notes.input[next],
-            notes.input_len - next + 1U);
-    notes.input_len -= removed;
-}
-
-static void notes_input_insert_text(const char *text, size_t text_len)
-{
-    if (text == NULL || text_len == 0 ||
-        text_len >= sizeof(notes.input) - notes.input_len) {
-        return;
-    }
-    memmove(&notes.input[notes.input_cursor + text_len],
-            &notes.input[notes.input_cursor],
-            notes.input_len - notes.input_cursor + 1U);
-    memcpy(&notes.input[notes.input_cursor], text, text_len);
-    notes.input_cursor += text_len;
-    notes.input_len += text_len;
-}
-
-static void notes_input_insert(uint8_t ch)
-{
-    if (!notes_is_printable(ch)) {
-        return;
-    }
-    const char text = (char)ch;
-    notes_input_insert_text(&text, 1);
-}
-
-static bool notes_handle_input(uint8_t ch)
-{
-    if (ch == SOLAR_OS_KEY_ESCAPE) {
+    const size_t cols = solar_os_tui_cols(&notes.tui);
+    const size_t label_width = strlen(notes_input_label());
+    solar_os_tui_input_state_t state = {
+        .cursor = notes.input_cursor, .view = notes.input_view_offset,
+    };
+    const solar_os_tui_input_action_t action = solar_os_tui_input_key(
+        notes.input, sizeof(notes.input), &state, ch,
+        cols > label_width ? cols - label_width : 1U);
+    notes.input_cursor = state.cursor;
+    notes.input_view_offset = state.view;
+    notes.input_len = strlen(notes.input);
+    if (action == SOLAR_OS_TUI_INPUT_CANCEL) {
         notes_cancel_input();
         return true;
     }
-    if (ch == '\r' || ch == '\n') {
+    if (action == SOLAR_OS_TUI_INPUT_SUBMIT) {
         notes_finish_input();
-        return true;
     }
-    if (ch == SOLAR_OS_KEY_LEFT) {
-        if (notes.input_cursor > 0) {
-            notes.input_cursor = notes_utf8_prev(notes.input, notes.input_cursor);
-        }
-        return true;
-    }
-    if (ch == SOLAR_OS_KEY_RIGHT) {
-        if (notes.input_cursor < notes.input_len) {
-            notes.input_cursor = notes_utf8_next(notes.input,
-                                                 notes.input_len,
-                                                 notes.input_cursor);
-        }
-        return true;
-    }
-    if (ch == SOLAR_OS_KEY_CTRL_LEFT) {
-        notes_input_word_left();
-        return true;
-    }
-    if (ch == SOLAR_OS_KEY_CTRL_RIGHT) {
-        notes_input_word_right();
-        return true;
-    }
-    if (ch == SOLAR_OS_KEY_HOME) {
-        notes.input_cursor = 0;
-        return true;
-    }
-    if (ch == SOLAR_OS_KEY_END) {
-        notes.input_cursor = notes.input_len;
-        return true;
-    }
-    if (ch == SOLAR_OS_KEY_DELETE) {
-        notes_input_delete();
-        return true;
-    }
-    if (ch == 0x08 || ch == 0x7f) {
-        notes_input_backspace();
-        return true;
-    }
-    notes_input_insert(ch);
     return true;
 }
 
@@ -1318,11 +1079,32 @@ static bool notes_find_move_target(size_t item, bool down, size_t *target)
     return false;
 }
 
-static void notes_move_selected_item(bool down)
+static void notes_move_selected(bool down)
 {
     const notes_view_row_t *row = notes_current_row();
-    if (row == NULL || row->type != NOTES_VIEW_ITEM || row->item >= notes.item_count) {
-        notes_set_message("select item");
+    if (row == NULL) {
+        return;
+    }
+    if (row->type == NOTES_VIEW_CATEGORY &&
+        row->category < notes.category_count) {
+        if ((!down && row->category == 0U) ||
+            (down && row->category + 1U >= notes.category_count)) {
+            notes_set_message(down ?
+                "bottom category" : "top category");
+            return;
+        }
+        const size_t target = down ? row->category + 1U : row->category - 1U;
+        const uint32_t keep_id = notes.categories[row->category].id;
+        const notes_category_t category = notes.categories[row->category];
+        notes.categories[row->category] = notes.categories[target];
+        notes.categories[target] = category;
+        notes_reorder_items(NOTES_SELECT_CATEGORY, keep_id);
+        if (notes_save() == ESP_OK) {
+            notes_set_message("moved category");
+        }
+        return;
+    }
+    if (row->type != NOTES_VIEW_ITEM || row->item >= notes.item_count) {
         return;
     }
 
@@ -1379,6 +1161,29 @@ static void notes_end(void)
     notes.cursor = 0;
 }
 
+static uint32_t notes_nearest_unchecked_item_id(size_t cursor)
+{
+    for (size_t i = cursor + 1U; i < notes.view_count; i++) {
+        const notes_view_row_t *row = &notes.view[i];
+        if (row->type == NOTES_VIEW_ITEM &&
+            row->item < notes.item_count &&
+            !notes.items[row->item].checked) {
+            return notes.items[row->item].id;
+        }
+    }
+    size_t i = cursor;
+    while (i > 0U) {
+        i--;
+        const notes_view_row_t *row = &notes.view[i];
+        if (row->type == NOTES_VIEW_ITEM &&
+            row->item < notes.item_count &&
+            !notes.items[row->item].checked) {
+            return notes.items[row->item].id;
+        }
+    }
+    return 0;
+}
+
 static void notes_toggle_selected(void)
 {
     const notes_view_row_t *row = notes_current_row();
@@ -1393,9 +1198,17 @@ static void notes_toggle_selected(void)
     if (row->type != NOTES_VIEW_ITEM || row->item >= notes.item_count) {
         return;
     }
-    const uint32_t id = notes.items[row->item].id;
+    const bool was_checked = notes.items[row->item].checked;
+    uint32_t keep_id = notes.items[row->item].id;
+    if (!was_checked) {
+        const uint32_t next_id =
+            notes_nearest_unchecked_item_id(notes.cursor);
+        if (next_id != 0U) {
+            keep_id = next_id;
+        }
+    }
     notes.items[row->item].checked = !notes.items[row->item].checked;
-    notes_reorder_items(NOTES_SELECT_ITEM, id);
+    notes_reorder_items(NOTES_SELECT_ITEM, keep_id);
     (void)notes_save();
 }
 
@@ -1444,6 +1257,57 @@ static void notes_delete_selected(void)
     (void)notes_save();
 }
 
+static void notes_tidy_completed(void)
+{
+    notes_select_kind_t keep_kind = NOTES_SELECT_NONE;
+    uint32_t keep_id = 0;
+    const notes_view_row_t *row = notes_current_row();
+    if (row != NULL && row->type == NOTES_VIEW_CATEGORY &&
+        row->category < notes.category_count) {
+        keep_kind = NOTES_SELECT_CATEGORY;
+        keep_id = notes.categories[row->category].id;
+    } else if (row != NULL && row->type == NOTES_VIEW_ITEM &&
+               row->item < notes.item_count) {
+        if (!notes.items[row->item].checked) {
+            keep_kind = NOTES_SELECT_ITEM;
+            keep_id = notes.items[row->item].id;
+        } else {
+            keep_id = notes_nearest_unchecked_item_id(notes.cursor);
+            if (keep_id != 0U) {
+                keep_kind = NOTES_SELECT_ITEM;
+            } else if (row->category < notes.category_count &&
+                       notes_category_visible(
+                           &notes.categories[row->category])) {
+                keep_kind = NOTES_SELECT_CATEGORY;
+                keep_id = notes.categories[row->category].id;
+            }
+        }
+    }
+
+    size_t kept = 0;
+    for (size_t i = 0; i < notes.item_count; i++) {
+        if (!notes.items[i].checked) {
+            notes.items[kept++] = notes.items[i];
+        }
+    }
+    const size_t removed = notes.item_count - kept;
+    if (removed == 0U) {
+        notes_set_message("nothing to tidy");
+        return;
+    }
+    notes.item_count = kept;
+    notes_reorder_items(keep_kind, keep_id);
+    if (notes_save() == ESP_OK) {
+        char message[NOTES_MESSAGE_MAX];
+        snprintf(message,
+                 sizeof(message),
+                 "removed %u done item%s",
+                 (unsigned)removed,
+                 removed == 1U ? "" : "s");
+        notes_set_message(message);
+    }
+}
+
 static void notes_collapse_selected(void)
 {
     const notes_view_row_t *row = notes_current_row();
@@ -1479,13 +1343,12 @@ static esp_err_t notes_start(solar_os_context_t *ctx)
         return ESP_ERR_NO_MEM;
     }
 
-    const esp_err_t tui_err = solar_os_tui_begin(&notes.tui, ctx);
+    const esp_err_t tui_err = solar_os_tui_screen_begin(&notes.tui, ctx);
     if (tui_err != ESP_OK) {
         notes_free_buffers();
         memset(&notes, 0, sizeof(notes));
         return tui_err;
     }
-    (void)solar_os_tui_enable_diff(&notes.tui, true);
 
     const int argc = solar_os_context_argc(ctx);
     if (argc > 2) {
@@ -1554,10 +1417,7 @@ static bool notes_event(solar_os_context_t *ctx, const solar_os_event_t *event)
         }
         if (event->data.key.codepoint != 0) {
             if (!notes.error_only && notes.input_mode != NOTES_INPUT_NONE) {
-                char encoded[4];
-                const size_t encoded_len =
-                    solar_os_input_encode_utf8(event->data.key.codepoint, encoded);
-                notes_input_insert_text(encoded, encoded_len);
+                (void)notes_handle_input(event->data.key.codepoint);
                 notes_render(ctx);
             }
             return true;
@@ -1600,10 +1460,10 @@ static bool notes_event(solar_os_context_t *ctx, const solar_os_event_t *event)
         notes_move_down();
         break;
     case SOLAR_OS_KEY_SHIFT_UP:
-        notes_move_selected_item(false);
+        notes_move_selected(false);
         break;
     case SOLAR_OS_KEY_SHIFT_DOWN:
-        notes_move_selected_item(true);
+        notes_move_selected(true);
         break;
     case SOLAR_OS_KEY_LEFT:
         notes_collapse_selected();
@@ -1638,6 +1498,10 @@ static bool notes_event(solar_os_context_t *ctx, const solar_os_event_t *event)
     case 'D':
     case SOLAR_OS_KEY_DELETE:
         notes_delete_selected();
+        break;
+    case 't':
+    case 'T':
+        notes_tidy_completed();
         break;
     case '\r':
     case '\n':

@@ -18,6 +18,7 @@ FRONT_MATTER_DELIMITER = "+++"
 QUICK_REFERENCE_HEADING = "quick reference"
 CATALOG_SCHEMA_VERSION = 2
 ARCHIVE_PATH = "manual.zip"
+AGENT_REFERENCE_CHUNK_MAX = 900
 COMMAND_GITHUB_HREFS = {
     "agent": "agent.md",
     "expansion": "expansion.md",
@@ -430,6 +431,97 @@ def markdown_to_terminal_text(markdown: str) -> str:
     return "\n".join(output) + "\n"
 
 
+def split_agent_reference(text: str) -> list[tuple[int, int]]:
+    """Return character ranges that remain small after UTF-8 encoding."""
+    chunks: list[tuple[int, int]] = []
+    start = 0
+    while start < len(text):
+        used = 0
+        limit = start
+        while limit < len(text):
+            encoded = len(text[limit].encode("utf-8"))
+            if used + encoded > AGENT_REFERENCE_CHUNK_MAX:
+                break
+            used += encoded
+            limit += 1
+        if limit == len(text):
+            end = limit
+        else:
+            minimum = start + max(1, (limit - start) // 3)
+            end = text.rfind("\n\n", minimum, limit)
+            if end >= minimum:
+                end += 2
+            else:
+                end = text.rfind("\n", minimum, limit)
+                if end >= minimum:
+                    end += 1
+                else:
+                    end = text.rfind(" ", minimum, limit)
+                    if end >= minimum:
+                        end += 1
+                    else:
+                        end = limit
+        chunks.append((start, end))
+        start = end
+    return chunks
+
+
+def derive_agent_references(
+    page_id: str,
+    markdown: str,
+    body: str,
+    packages: list[str],
+    path: Path,
+) -> list[dict[str, object]]:
+    """Index focused manual excerpts without duplicating their body strings."""
+    lines = markdown.splitlines()
+    boundaries = [
+        index
+        for index, line in enumerate(lines)
+        if (heading := heading_text(line)) is not None and heading[0] in (2, 3)
+    ]
+    sections: list[tuple[int, int, str]] = []
+    first = boundaries[0] if boundaries else len(lines)
+    if first > 0:
+        sections.append((0, first, "Overview"))
+    for position, start in enumerate(boundaries):
+        end = boundaries[position + 1] if position + 1 < len(boundaries) else len(lines)
+        heading = heading_text(lines[start])
+        assert heading is not None
+        sections.append((start, end, strip_inline_markdown(heading[1])))
+
+    references: list[dict[str, object]] = []
+    search_from = 0
+    for start, end, section in sections:
+        if section.casefold() == QUICK_REFERENCE_HEADING:
+            continue
+        rendered = markdown_to_terminal_text("\n".join(lines[start:end]))
+        body_offset = body.find(rendered, search_from)
+        if body_offset < 0:
+            raise ValueError(
+                f"{path}: agent reference section {section!r} is not in rendered body"
+            )
+        search_from = body_offset + len(rendered)
+        ranges = split_agent_reference(rendered)
+        topic = f"{page_id}.{topic_slug(section)}"
+        for part, (chunk_start, chunk_end) in enumerate(ranges, start=1):
+            absolute = body_offset + chunk_start
+            excerpt = rendered[chunk_start:chunk_end]
+            references.append(
+                {
+                    "page_id": page_id,
+                    "topic": topic,
+                    "section": section,
+                    "offset": len(body[:absolute].encode("utf-8")),
+                    "length": len(excerpt.encode("utf-8")),
+                    "part": part,
+                    "parts": len(ranges),
+                    "packages_any": packages,
+                }
+            )
+    return references
+
+
 def load_pages(source: Path, packages_path: Path) -> list[dict[str, object]]:
     if not source.is_dir():
         raise ValueError("manual input must be a directory of Markdown pages")
@@ -487,6 +579,21 @@ def load_pages(source: Path, packages_path: Path) -> list[dict[str, object]]:
         page["markdown"] = markdown
         page["body"] = markdown_to_terminal_text(markdown)
         page["contract"] = extract_quick_reference(markdown, path)
+        agent_sections = page.get("agent_reference_sections", False)
+        if not isinstance(agent_sections, bool):
+            raise ValueError(f"{path}: agent_reference_sections must be a boolean")
+        page["agent_reference_sections"] = agent_sections
+        page["agent_references"] = (
+            derive_agent_references(
+                page_id,
+                markdown,
+                str(page["body"]),
+                packages_any,
+                path,
+            )
+            if agent_sections
+            else []
+        )
         page["release_markdown"] = path.read_text(encoding="utf-8")
         page["derived"] = False
         pages.append(page)
@@ -573,6 +680,41 @@ def render_header(pages: list[dict[str, object]], source: Path) -> str:
             "#define SOLAR_OS_MANUAL_GENERATED_PAGE_COUNT \\",
             "    (sizeof(SOLAR_OS_MANUAL_GENERATED_PAGES) / \\",
             "     sizeof(SOLAR_OS_MANUAL_GENERATED_PAGES[0]))",
+            "",
+            "static const solar_os_manual_reference_t "
+            "SOLAR_OS_MANUAL_GENERATED_REFERENCES[] = {",
+            "    {0},",
+        ]
+    )
+    for page in pages:
+        for reference in page.get("agent_references", []):
+            packages = list(reference["packages_any"])
+            if packages:
+                lines.append(
+                    "#if " + " || ".join(package_macro(package) for package in packages)
+                )
+            lines.extend(
+                [
+                    "    {",
+                    f"        .page_id = {c_string(str(reference['page_id']))},",
+                    f"        .topic = {c_string(str(reference['topic']))},",
+                    f"        .section = {c_string(str(reference['section']))},",
+                    f"        .offset = {int(reference['offset'])}U,",
+                    f"        .length = {int(reference['length'])}U,",
+                    f"        .part = {int(reference['part'])}U,",
+                    f"        .parts = {int(reference['parts'])}U,",
+                    "    },",
+                ]
+            )
+            if packages:
+                lines.append("#endif")
+    lines.extend(
+        [
+            "};",
+            "",
+            "#define SOLAR_OS_MANUAL_GENERATED_REFERENCE_COUNT \\",
+            "    (sizeof(SOLAR_OS_MANUAL_GENERATED_REFERENCES) / \\",
+            "     sizeof(SOLAR_OS_MANUAL_GENERATED_REFERENCES[0]) - 1U)",
             "",
         ]
     )

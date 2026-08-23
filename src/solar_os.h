@@ -63,6 +63,7 @@ typedef struct {
     solar_os_launch_policy_t launch_policy;
     bool exit_requested;
     bool sleep_requested;
+    bool suspend_requested;
     solar_os_session_request_type_t session_request;
     uint8_t session_request_id;
     solar_os_session_list_fn session_list_fn;
@@ -187,6 +188,8 @@ void solar_os_context_request_exit(solar_os_context_t *ctx);
 bool solar_os_context_take_exit_request(solar_os_context_t *ctx);
 void solar_os_context_request_sleep(solar_os_context_t *ctx);
 bool solar_os_context_take_sleep_request(solar_os_context_t *ctx);
+void solar_os_context_request_suspend(solar_os_context_t *ctx);
+bool solar_os_context_take_suspend_request(solar_os_context_t *ctx);
 void solar_os_context_set_session_list_handler(solar_os_context_t *ctx,
                                                solar_os_session_list_fn fn,
                                                void *user);

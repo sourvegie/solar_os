@@ -1,5 +1,6 @@
 # ESP32-S3-RLCD-4.2 baseline from Waveshare's ESP-IDF examples.
 CONFIG_IDF_TARGET="esp32s3"
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
@@ -30,6 +31,9 @@ CONFIG_FATFS_VOLUME_COUNT=4
 CONFIG_LWIP_IP_FORWARD=y
 CONFIG_LWIP_IPV4_NAPT=y
 CONFIG_LWIP_IPV4_NAPT_PORTMAP=y
+# WireGuard performs its initial key setup from an lwIP core callback. The
+# default 3 KiB TCP/IP task stack is not sufficient for the reference crypto.
+CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=5120
 CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y
 # Let large TLS buffers follow the normal heap policy. PSRAM boards keep small
 # crypto allocations internal while placing large record buffers in PSRAM;

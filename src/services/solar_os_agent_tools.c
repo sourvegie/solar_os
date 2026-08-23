@@ -223,8 +223,10 @@
     "{\"type\":\"object\",\"properties\":{\"guidance\":{\"type\":\"string\"}," \
     "\"count\":{\"type\":\"integer\"}," \
     "\"matches\":{\"type\":\"array\",\"items\":{\"type\":\"object\"," \
-    "\"properties\":{\"topic\":{\"type\":\"string\"},\"reference\":" \
-    "{\"type\":\"string\"}},\"required\":[\"topic\",\"reference\"]," \
+    "\"properties\":{\"topic\":{\"type\":\"string\"},\"section\":" \
+    "{\"type\":\"string\"},\"part\":{\"type\":\"integer\"},\"parts\":" \
+    "{\"type\":\"integer\"},\"reference\":{\"type\":\"string\"}}," \
+    "\"required\":[\"topic\",\"reference\"]," \
     "\"additionalProperties\":false}}},\"required\":[\"guidance\",\"count\"," \
     "\"matches\"]," \
     "\"additionalProperties\":false}"
@@ -493,8 +495,8 @@ static const agent_tool_definition_t AGENT_TOOL_REGISTRY[] = {
         .provider = {
             .name = "solaros_reference",
             .description =
-                "Search the authoritative installed SolarOS Python and Lua API "
-                "contracts and mandatory coding guidance. Pass exactly one "
+                "Search focused firmware-matched SolarOS Python and Lua manual "
+                "excerpts and mandatory coding guidance. Pass exactly one "
                 "field named query that combines the language and task, for "
                 "example {\"query\":\"lua gfx drawing\"}. Make one "
                 "comprehensive query before writing or running code, and "
@@ -2808,7 +2810,7 @@ static esp_err_t agent_tool_hardware_describe(
     (void)root;
     solar_os_json_free(doc);
 
-    char capabilities[384];
+    char capabilities[SOLAR_OS_BOARD_CAPABILITIES_TEXT_MAX];
     char escaped_capabilities[sizeof(capabilities) *
                               AGENT_TOOL_JSON_ESCAPE_FACTOR + 1U];
     solar_os_board_capabilities_format(capabilities, sizeof(capabilities));

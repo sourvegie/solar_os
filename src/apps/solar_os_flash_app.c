@@ -22,6 +22,7 @@
 #include "solar_os_task.h"
 #include "solar_os_terminal.h"
 #include "solar_os_tui.h"
+#include "solar_os_tui_widgets.h"
 #include "solar_os_uart.h"
 
 #define FLASH_APP_TASK_STACK 16384U
@@ -149,22 +150,6 @@ static solar_os_shell_io_t *flash_io(flash_app_state_t *state) {
     io = &state->fallback_io;
   }
   return io;
-}
-
-static void flash_app_add_clipped(flash_app_state_t *state, size_t row,
-                                  size_t col, size_t width, const char *text,
-                                  uint8_t attr) {
-  char line[SOLAR_OS_TERMINAL_MAX_COLS + 1U];
-  if (state == NULL || text == NULL || width == 0U)
-    return;
-  if (width > SOLAR_OS_TERMINAL_MAX_COLS)
-    width = SOLAR_OS_TERMINAL_MAX_COLS;
-  size_t len = strlen(text);
-  if (len > width)
-    len = width;
-  memcpy(line, text, len);
-  line[len] = '\0';
-  (void)solar_os_tui_addstr(&state->tui, row, col, line, attr);
 }
 
 static bool flash_app_artifact_first_board(
@@ -417,7 +402,7 @@ flash_app_selected_artifact(const flash_app_state_t *state,
   return &state->catalog->artifacts[state->nodes[node].artifact_index];
 }
 
-static void flash_app_render_status(flash_app_state_t *state, size_t cols) {
+static void flash_app_render_status(flash_app_state_t *state) {
   char status[192];
   if (state->running) {
     const char *stage = state->progress_valid
@@ -448,28 +433,19 @@ static void flash_app_render_status(flash_app_state_t *state, size_t cols) {
     snprintf(status, sizeof(status), "Flash | no verified catalog | %s",
              state->port);
   }
-  (void)solar_os_tui_fill(&state->tui, 0U, 0U, 1U, cols, ' ',
-                          SOLAR_OS_TUI_ATTR_INVERSE |
-                              SOLAR_OS_TUI_ATTR_BOLD);
-  flash_app_add_clipped(state, 0U, 0U, cols, status,
-                        SOLAR_OS_TUI_ATTR_INVERSE |
-                            SOLAR_OS_TUI_ATTR_BOLD);
+  solar_os_tui_draw_title(&state->tui, status, NULL);
 }
 
 static void flash_app_render_tabs(flash_app_state_t *state, size_t cols) {
   (void)solar_os_tui_fill(&state->tui, 1U, 0U, 1U, cols, ' ',
                           SOLAR_OS_TUI_ATTR_NORMAL);
-  flash_app_add_clipped(
-      state, 1U, 1U, cols > 1U ? cols - 1U : 0U, " Catalog ",
-      state->tab == FLASH_APP_TAB_CATALOG
-          ? SOLAR_OS_TUI_ATTR_INVERSE | SOLAR_OS_TUI_ATTR_BOLD
-          : SOLAR_OS_TUI_ATTR_NORMAL);
+  solar_os_tui_draw_tab(&state->tui, 1U, 1U,
+                        cols > 1U ? cols - 1U : 0U, " Catalog ",
+                        state->tab == FLASH_APP_TAB_CATALOG);
   if (cols > 13U) {
-    flash_app_add_clipped(
-        state, 1U, 12U, cols - 12U, " Settings ",
-        state->tab == FLASH_APP_TAB_SETTINGS
-            ? SOLAR_OS_TUI_ATTR_INVERSE | SOLAR_OS_TUI_ATTR_BOLD
-            : SOLAR_OS_TUI_ATTR_NORMAL);
+    solar_os_tui_draw_tab(&state->tui, 1U, 12U, cols - 12U,
+                          " Settings ",
+                          state->tab == FLASH_APP_TAB_SETTINGS);
   }
 }
 
@@ -478,13 +454,13 @@ static void flash_app_render_catalog(flash_app_state_t *state, size_t rows,
   const size_t visible_rows = rows > 3U ? rows - 3U : 0U;
   flash_app_ensure_visible(state, visible_rows);
   if (!solar_os_storage_sd_is_mounted()) {
-    flash_app_add_clipped(state, 3U, 2U, cols > 4U ? cols - 4U : 0U,
+    solar_os_tui_write_cell(&state->tui, 3U, 2U, cols > 4U ? cols - 4U : 0U,
                           "SD card is not mounted.",
                           SOLAR_OS_TUI_ATTR_BOLD);
     return;
   }
   if (state->catalog == NULL) {
-    flash_app_add_clipped(state, 3U, 2U, cols > 4U ? cols - 4U : 0U,
+    solar_os_tui_write_cell(&state->tui, 3U, 2U, cols > 4U ? cols - 4U : 0U,
                           "No verified catalog. Press r to refresh.",
                           SOLAR_OS_TUI_ATTR_BOLD);
     return;
@@ -518,7 +494,7 @@ static void flash_app_render_catalog(flash_app_state_t *state, size_t rows,
                         ? SOLAR_OS_TUI_ATTR_NORMAL
                         : SOLAR_OS_TUI_ATTR_BOLD);
     (void)solar_os_tui_fill(&state->tui, row + 2U, 0U, 1U, cols, ' ', attr);
-    flash_app_add_clipped(state, row + 2U, 0U, cols, line, attr);
+    solar_os_tui_write_cell(&state->tui, row + 2U, 0U, cols, line, attr);
   }
 }
 
@@ -551,12 +527,12 @@ static void flash_app_render_settings(flash_app_state_t *state, size_t rows,
                              : SOLAR_OS_TUI_ATTR_NORMAL;
     (void)solar_os_tui_fill(&state->tui, row + 3U, 1U, 1U,
                             cols > 2U ? cols - 2U : 0U, ' ', attr);
-    flash_app_add_clipped(state, row + 3U, 1U,
+    solar_os_tui_write_cell(&state->tui, row + 3U, 1U,
                           cols > 2U ? cols - 2U : 0U, line, attr);
   }
   if (rows > 8U) {
-    flash_app_add_clipped(
-        state, 7U, 2U, cols > 4U ? cols - 4U : 0U,
+    solar_os_tui_write_cell(
+        &state->tui, 7U, 2U, cols > 4U ? cols - 4U : 0U,
         "Control pins are optional and refer to GPIOs on this SolarOS device.",
         SOLAR_OS_TUI_ATTR_NORMAL);
   }
@@ -621,10 +597,7 @@ static void flash_app_render_footer(flash_app_state_t *state, size_t rows,
     return;
   char footer[SOLAR_OS_TERMINAL_MAX_COLS + 1U];
   flash_app_footer(state, cols, footer, sizeof(footer));
-  (void)solar_os_tui_fill(&state->tui, rows - 1U, 0U, 1U, cols, ' ',
-                          SOLAR_OS_TUI_ATTR_INVERSE);
-  flash_app_add_clipped(state, rows - 1U, 0U, cols, footer,
-                        SOLAR_OS_TUI_ATTR_INVERSE);
+  solar_os_tui_draw_help(&state->tui, footer);
 }
 
 static solar_os_tui_rect_t flash_app_popup_bounds(size_t rows, size_t cols) {
@@ -731,11 +704,9 @@ static void flash_app_render(flash_app_state_t *state) {
     solar_os_tui_refresh(&state->tui);
     return;
   }
-  flash_app_render_status(state, cols);
+  flash_app_render_status(state);
   if (rows < 4U || cols < 20U) {
-    if (rows > 1U)
-      flash_app_add_clipped(state, 1U, 0U, cols, "terminal too small",
-                            SOLAR_OS_TUI_ATTR_BOLD);
+    solar_os_tui_draw_too_small(&state->tui, "flash");
   } else {
     flash_app_render_tabs(state, cols);
     if (state->tab == FLASH_APP_TAB_CATALOG)
@@ -1349,13 +1320,12 @@ static esp_err_t flash_app_start(solar_os_context_t *ctx) {
   };
   flash_app_reload_catalog(flash_app);
   if (!flash_app_handle_command(flash_app)) {
-    const esp_err_t err = solar_os_tui_begin(&flash_app->tui, ctx);
+    const esp_err_t err = solar_os_tui_screen_begin(&flash_app->tui, ctx);
     if (err != ESP_OK) {
       flash_app_cleanup();
       return err;
     }
     flash_app->tui_active = true;
-    (void)solar_os_tui_enable_diff(&flash_app->tui, true);
     flash_app_render(flash_app);
   }
   solar_os_shell_io_flush(flash_io(flash_app));

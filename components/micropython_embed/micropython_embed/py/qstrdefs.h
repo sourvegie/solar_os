@@ -63,17 +63,6 @@ Q(<genexpr>)
 Q(<string>)
 Q(<stdin>)
 Q(utf-8)
-Q(array)
-Q(dsp_processor)
-Q(execute)
-Q(process)
-Q(reset)
-
-#if MICROPY_PY_BUILTINS_MIN_MAX
-Q(default)
-Q(max)
-Q(min)
-#endif
 
 #if MICROPY_MODULE_FROZEN
 Q(.frozen)

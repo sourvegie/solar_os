@@ -8,7 +8,7 @@ static const char * const ota_commands[] = {"status", "check", "upgrade", "url",
 static const char * const job_commands[] = {"status", "start", "stop"};
 static const char * const setterm_commands[] = {
     "orientation", "font", "textsize", "palette", "statusbar", "brightness", "backlight",
-    "profile", "charset", "keyboard", "keymap", "keyrate", "typerate",
+    "profile", "charset", "keyboard", "keymap", "powerkey", "key", "keyrate", "typerate",
     "repeat", "timezone", "startup", "otaurl", "ota",
 };
 static const char * const stream_commands[] = {"list", "status"};
@@ -58,6 +58,7 @@ static const char * const sshkey_commands[] = {"status", "gen", "pub", "rm"};
 #endif
 #include "solar_os_port.h"
 #include "solar_os_port_shell.h"
+#include "solar_os_power.h"
 #include "solar_os_sessions.h"
 #include "solar_os_shell.h"
 #if SOLAR_OS_PACKAGE_SERVICE_SSH
@@ -1482,6 +1483,7 @@ static void setterm_print_usage(solar_os_shell_io_t *term)
 #if SOLAR_OS_PACKAGE_SERVICE_BLE
     solar_os_shell_io_writeln(term, "  setterm keyboard [us|de|ru]");
 #endif
+    solar_os_shell_io_writeln(term, "  setterm powerkey [sleep|suspend]");
     solar_os_shell_io_writeln(term, "  setterm keyrate [off|1..60 [delay-ms]]");
     solar_os_shell_io_writeln(term, "  setterm timezone [UTC|Europe/Berlin|POSIX-TZ]");
     solar_os_shell_io_writeln(term, "  setterm startup [flash|sd]");
@@ -1835,6 +1837,41 @@ void solar_os_shell_cmd_setterm(solar_os_context_t *ctx, int argc, char **argv)
         return;
     }
 
+    if (strcmp(argv[1], "powerkey") == 0 || strcmp(argv[1], "key") == 0) {
+        if (argc == 2) {
+            solar_os_power_status_t status;
+            solar_os_power_get_status(&status);
+            solar_os_shell_io_printf(term,
+                                     "powerkey: %s\n",
+                                     solar_os_power_key_action_name(status.key_action));
+            solar_os_shell_io_writeln(term, "values: sleep suspend");
+            return;
+        }
+        if (argc != 3) {
+            solar_os_shell_diag_unexpected(term, "setterm powerkey", argv[3],
+                                           "setterm powerkey [sleep|suspend]");
+            return;
+        }
+
+        solar_os_power_key_action_t action;
+        if (!solar_os_power_parse_key_action(argv[2], &action) ||
+            (action != SOLAR_OS_POWER_KEY_ACTION_SLEEP &&
+             action != SOLAR_OS_POWER_KEY_ACTION_SUSPEND)) {
+            solar_os_shell_diag_invalid(term,
+                                        "setterm powerkey",
+                                        "action",
+                                        argv[2],
+                                        "sleep or suspend",
+                                        "setterm powerkey [sleep|suspend]",
+                                        false);
+            return;
+        }
+
+        const esp_err_t err = solar_os_power_set_key_action(action);
+        setterm_print_save_result(term, "powerkey", argv[2], err);
+        return;
+    }
+
     if (strcmp(argv[1], "keyrate") == 0 ||
         strcmp(argv[1], "typerate") == 0 ||
         strcmp(argv[1], "repeat") == 0) {
@@ -2025,7 +2062,7 @@ void solar_os_shell_cmd_setterm(solar_os_context_t *ctx, int argc, char **argv)
                                    "setterm",
                                    argc,
                                    argv,
-                                   "setterm orientation|font|textsize|palette|statusbar|brightness|backlight|profile|charset|keyboard|keyrate|timezone|startup|otaurl",
+                                   "setterm orientation|font|textsize|palette|statusbar|brightness|backlight|profile|charset|keyboard|powerkey|keyrate|timezone|startup|otaurl",
                                    setterm_commands,
                                    sizeof(setterm_commands) / sizeof(setterm_commands[0]));
 }

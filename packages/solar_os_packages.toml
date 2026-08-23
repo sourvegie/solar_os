@@ -45,7 +45,10 @@ members = [
   "expansion_rfm69",
   "expansion_rfm95",
   "expansion_pcd8544",
+  "expansion_ssd1683",
   "expansion_ssd1306",
+  "expansion_sdspi",
+  "expansion_cardkb",
   "expansion_neopixel",
   "expansion_audio_pwm",
   "expansion_pcm5102",
@@ -116,6 +119,7 @@ triggers = [
 capabilities = ["wifi"]
 members = [
   "service_wifi",
+  "service_wireguard",
   "service_espnow",
   "service_net",
   "service_mqtt",
@@ -255,8 +259,10 @@ sources = [
   "services/solar_os_splash.c",
   "services/solar_os_storage.c",
   "services/solar_os_terminal.c",
+  "services/solar_os_terminal_geometry.c",
   "services/solar_os_time.c",
   "services/solar_os_tui.c",
+  "services/solar_os_tui_widgets.c",
 ]
 requires = [
   "esp_driver_gpio",
@@ -323,6 +329,7 @@ sources = [
   "shell/solar_os_shell_commands.c",
   "shell/solar_os_shell_io.c",
   "shell/solar_os_shell_manual.c",
+  "shell/solar_os_shell_line.c",
   "shell/solar_os_shell_setterm_tui.c",
   "shell/solar_os_shell_system.c",
   "shell/solar_os_vt100.c",
@@ -363,11 +370,22 @@ sources = ["services/solar_os_zip.c"]
 [packages.service_wifi]
 label = "service.wifi"
 sources = [
+  "services/solar_os_lwip_route.c",
   "services/solar_os_wifi.c",
   "shell/solar_os_shell_network.c",
   "shell/solar_os_shell_wifi_tui.c",
 ]
 requires = ["esp_event", "esp_netif", "esp_wifi", "lwip", "nvs_flash"]
+capabilities = ["wifi"]
+
+[packages.service_wireguard]
+label = "network.wireguard"
+depends = ["service_wifi"]
+sources = [
+  "services/solar_os_wireguard.c",
+  "shell/solar_os_shell_wireguard.c",
+]
+requires = ["esp_event", "esp_netif", "esp_system", "esp_wifi", "lwip", "nvs_flash", "wireguard_lwip"]
 capabilities = ["wifi"]
 
 [packages.service_espnow]
@@ -385,6 +403,13 @@ label = "network.base"
 depends = ["service_wifi"]
 sources = ["services/solar_os_net.c"]
 requires = ["lwip"]
+capabilities = ["wifi"]
+
+[packages.service_script_net]
+label = "service.script-network"
+depends = ["service_net"]
+sources = ["services/solar_os_net_session.c"]
+requires = ["esp-tls", "esp_timer", "lwip", "mbedtls", "tcp_transport"]
 capabilities = ["wifi"]
 
 [packages.service_mqtt]
@@ -445,7 +470,10 @@ capabilities = ["psram", "wifi"]
 [packages.service_http_client]
 label = "network.http-client"
 depends = ["service_wifi"]
-sources = ["services/solar_os_http_client.c"]
+sources = [
+  "services/solar_os_http_client.c",
+  "services/solar_os_http_stream.c",
+]
 requires = ["esp_http_client", "esp_timer"]
 capabilities = ["wifi"]
 
@@ -759,6 +787,16 @@ sources = [
 requires = ["esp_driver_gpio", "esp_driver_spi", "u8g2"]
 capabilities = ["expansion_gpio"]
 
+[packages.expansion_ssd1683]
+label = "expansion.ssd1683"
+depends = ["service_spi"]
+sources = [
+  "drivers/epd_ssd1683.c",
+  "services/solar_os_ssd1683.c",
+]
+requires = ["esp_driver_gpio", "esp_driver_spi", "esp_timer", "u8g2"]
+capabilities = ["expansion_gpio"]
+
 [packages.expansion_ssd1306]
 label = "expansion.ssd1306"
 depends = ["service_i2c"]
@@ -768,6 +806,27 @@ sources = [
 ]
 requires = ["esp_driver_i2c", "u8g2"]
 capabilities = ["expansion_i2c"]
+
+[packages.expansion_cardkb]
+label = "expansion.cardkb"
+depends = ["service_expansion", "service_i2c"]
+sources = [
+  "services/solar_os_cardkb.c",
+  "services/solar_os_cardkb_codec.c",
+]
+requires = ["esp_driver_i2c"]
+capabilities = ["expansion_i2c"]
+
+[packages.expansion_sdspi]
+label = "expansion.sdspi"
+depends = ["service_expansion", "service_spi"]
+sources = [
+  "board/solar_os_board_storage_sd.c",
+  "drivers/sd_card.c",
+  "services/solar_os_sdspi.c",
+]
+requires = ["esp_driver_gpio", "esp_driver_sdspi", "fatfs", "heap", "sdmmc"]
+capabilities = ["expansion_spi"]
 
 [packages.expansion_neopixel]
 label = "expansion.neopixel"
@@ -1017,14 +1076,14 @@ capabilities = ["gfx", "psram", "sd"]
 
 [packages.app_python]
 label = "app.python"
-depends = ["service_messaging", "service_script_runner"]
+depends = ["service_messaging", "service_script_net", "service_script_runner"]
 sources = ["apps/solar_os_python.c"]
 requires = ["micropython_embed"]
 capabilities = ["psram"]
 
 [packages.app_lua]
 label = "app.lua"
-depends = ["service_messaging", "service_script_runner"]
+depends = ["service_messaging", "service_script_net", "service_script_runner"]
 sources = ["apps/solar_os_lua.c"]
 requires = ["lua"]
 capabilities = ["psram"]

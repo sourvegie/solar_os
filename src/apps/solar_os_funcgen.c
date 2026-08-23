@@ -20,6 +20,7 @@
 #include "solar_os_signal_widgets.h"
 #include "solar_os_synth.h"
 #include "solar_os_tui.h"
+#include "solar_os_tui_widgets.h"
 
 #define FUNCGEN_OWNER "app:funcgen"
 #define FUNCGEN_PARAMETER_OWNER "funcgen"
@@ -700,18 +701,9 @@ static void funcgen_render_tui(void)
         return;
     }
     solar_os_tui_clear(&funcgen.tui);
-    const size_t cols = solar_os_tui_cols(&funcgen.tui);
     char line[128];
-    snprintf(line, sizeof(line), " FUNCTION GENERATOR  [%s] ",
-             funcgen.enabled ? "OUTPUT ON" : "OUTPUT OFF");
-    (void)solar_os_tui_addstr(&funcgen.tui, 0U, 0U, line,
-                              SOLAR_OS_TUI_ATTR_INVERSE |
-                                  SOLAR_OS_TUI_ATTR_BOLD);
-    if (cols > strlen(line)) {
-        (void)solar_os_tui_hline(&funcgen.tui, 0U, strlen(line),
-                                 cols - strlen(line), ' ',
-                                 SOLAR_OS_TUI_ATTR_INVERSE);
-    }
+    solar_os_tui_draw_title(&funcgen.tui, "FUNCTION GENERATOR",
+                            funcgen.enabled ? "OUTPUT ON" : "OUTPUT OFF");
     for (size_t i = 0U; i < FUNCGEN_CONTROL_COUNT; i++) {
         char value[48];
         funcgen_control_value((funcgen_control_t)i, value, sizeof(value));
@@ -734,9 +726,8 @@ static void funcgen_render_tui(void)
                                           : "");
     (void)solar_os_tui_addstr(&funcgen.tui, FUNCGEN_CONTROL_COUNT + 3U, 2U,
                               line, SOLAR_OS_TUI_ATTR_NORMAL);
-    (void)solar_os_tui_addstr(&funcgen.tui, FUNCGEN_CONTROL_COUNT + 5U, 0U,
-                              "Arrows select/tune  Space output  Esc exit",
-                              SOLAR_OS_TUI_ATTR_BOLD);
+    solar_os_tui_draw_help(&funcgen.tui,
+                           "Arrows select/tune  Space output  Esc exit");
     solar_os_tui_refresh(&funcgen.tui);
     funcgen.redraw = false;
 }
@@ -900,10 +891,7 @@ static esp_err_t funcgen_start(solar_os_context_t *ctx)
 
     esp_err_t err;
     if (funcgen.mode == FUNCGEN_MODE_TUI) {
-        err = solar_os_tui_begin(&funcgen.tui, ctx);
-        if (err == ESP_OK) {
-            (void)solar_os_tui_enable_diff(&funcgen.tui, true);
-        }
+        err = solar_os_tui_screen_begin(&funcgen.tui, ctx);
     } else {
         err = solar_os_oscilloscope_widget_create(FUNCGEN_SCOPE_SAMPLES,
                                                   &funcgen.scope);

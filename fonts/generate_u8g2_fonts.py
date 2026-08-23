@@ -70,6 +70,13 @@ class GeneratedFont:
     symbol: str
 
 
+@dataclass(frozen=True)
+class RasterizedGlyph:
+    rows: list[int]
+    width: int
+    x_offset: int
+
+
 def parse_sizes(value: str) -> list[int]:
     sizes: list[int] = []
     for item in value.split(","):
@@ -159,17 +166,20 @@ def font_cell_width(font: ImageFont.FreeTypeFont, codepoints: Iterable[int], str
 def rasterize_glyph(
     font: ImageFont.FreeTypeFont,
     codepoint: int,
-    width: int,
+    cell_width: int,
     height: int,
     ascent: int,
     threshold: int,
     antialias: bool,
-) -> list[int]:
+) -> RasterizedGlyph:
+    left, _top, right, _bottom = font.getbbox(chr(codepoint), anchor="ls")
+    x_offset = min(0, left)
+    width = max(cell_width, right) - x_offset
     image = Image.new("L", (width, height), 0)
     draw = ImageDraw.Draw(image)
     if not antialias:
         draw.fontmode = "1"
-    draw.text((0, ascent), chr(codepoint), fill=255, font=font, anchor="ls")
+    draw.text((-x_offset, ascent), chr(codepoint), fill=255, font=font, anchor="ls")
 
     rows: list[int] = []
     for y in range(height):
@@ -179,7 +189,7 @@ def rasterize_glyph(
             if image.getpixel((x, y)) >= threshold:
                 bits |= 1
         rows.append(bits)
-    return rows
+    return RasterizedGlyph(rows=rows, width=width, x_offset=x_offset)
 
 
 def rows_to_hex(rows: list[int], width: int) -> list[str]:
@@ -242,14 +252,22 @@ def write_bdf(
         out.write(f"CHARS {len(codepoints)}\n")
 
         for codepoint in codepoints:
-            rows = rasterize_glyph(font, codepoint, cell_width, cell_height, ascent, threshold, antialias)
+            glyph = rasterize_glyph(
+                font,
+                codepoint,
+                cell_width,
+                cell_height,
+                ascent,
+                threshold,
+                antialias,
+            )
             out.write(f"STARTCHAR {glyph_safe_char(codepoint)}\n")
             out.write(f"ENCODING {codepoint}\n")
             out.write(f"SWIDTH {cell_width * 1000 // max(size, 1)} 0\n")
             out.write(f"DWIDTH {cell_width} 0\n")
-            out.write(f"BBX {cell_width} {cell_height} 0 -{descent}\n")
+            out.write(f"BBX {glyph.width} {cell_height} {glyph.x_offset} -{descent}\n")
             out.write("BITMAP\n")
-            for line in rows_to_hex(rows, cell_width):
+            for line in rows_to_hex(glyph.rows, glyph.width):
                 out.write(f"{line}\n")
             out.write("ENDCHAR\n")
 
@@ -341,11 +359,13 @@ def draw_preview(
                     threshold,
                     antialias,
                 )
-                for gy, row in enumerate(glyph_rows):
-                    for gx in range(item.cell_width):
-                        bit = (row >> (item.cell_width - gx - 1)) & 1
+                for gy, row in enumerate(glyph_rows.rows):
+                    for gx in range(glyph_rows.width):
+                        bit = (row >> (glyph_rows.width - gx - 1)) & 1
                         if bit:
-                            image.putpixel((x + gx, y + gy), 0)
+                            pixel_x = x + glyph_rows.x_offset + gx
+                            if 0 <= pixel_x < image.width:
+                                image.putpixel((pixel_x, y + gy), 0)
                 x += item.cell_width
             y += item.cell_height
         y += item.cell_height

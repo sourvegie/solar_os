@@ -6,6 +6,7 @@ summary = "Complete MicroPython service API, conventions, and examples"
 aliases = ["micropython", "python.api"]
 keywords = "python micropython solaros api storage wifi gpio buses gfx tui examples"
 packages_any = ["app_python"]
+agent_reference_sections = true
 +++
 # SolarOS Python API
 
@@ -30,10 +31,59 @@ solaros.write("SolarOS " + solaros.version() + "\n")
 
 Most mutating functions return `None` on success and raise `OSError("ESP_ERR_...")` on service failure. Query functions return strings, integers, booleans, dictionaries, or lists.
 
-SolarOS uses a size-trimmed MicroPython configuration but includes the standard
-`min()` and `max()` built-ins used by ordinary device scripts.
+SolarOS uses MicroPython's size-conscious `EXTRA` language profile. This adds
+common language features such as f-strings, sets, properties, descriptors,
+`enumerate()`, `filter()`, `reversed()`, `memoryview`, and `frozenset`. The
+importable runtime modules are `array`, `binascii`, `cmath`, `collections`,
+`errno`, `gc`, `hashlib`, `io`, `json`, `math`, `micropython`, `random`,
+`struct`, and `sys`.
+
+`input()`, `execfile()`, and upstream `extmod` modules outside this selected
+set remain disabled. Use the typed `solaros` service APIs instead.
+
+The selected modules include `json.loads()` and `json.dumps()`, hexadecimal and
+Base64 conversions in `binascii`, SHA-256 in `hashlib`, and the usual
+non-cryptographic `random` helpers. SolarOS seeds `random` from the ESP32
+hardware random source when the module is first imported. Use `hashlib` for
+hashing and an appropriate SolarOS security service, not `random`, for
+security-sensitive values.
 
 Functions that accept file paths use SolarOS shell-style paths. `/` means the default storage mount; internally this resolves to the active storage mount point.
+
+## Files and imports
+
+`open(path[, mode])` opens a file through SolarOS storage. Text mode is the
+default; add `b` for bytes. The supported base modes are `r`, `w`, `a`, and
+exclusive-create `x`, and each can use `+` for updating. File objects support
+`read`, `readinto`, `readline`, `readlines`, `write`, `seek`, `tell`, `flush`,
+and `close`, and can be used as context managers.
+
+```python
+with open("/notes/example.txt", "w") as output:
+    output.write("hello from Python\n")
+
+with open("/notes/example.txt") as source:
+    print(source.read())
+```
+
+Paths use the same preferred-storage and explicit-mount rules as
+`solaros.storage`. They cannot bypass SolarOS mounts to reach an unrelated
+host filesystem. Long reads and writes remain responsive to app cancellation.
+
+External imports support `.py`, `.mpy`, and package directories containing
+`__init__.py` or `__init__.mpy`. A file-run starts its search in the script's
+directory and then searches the other entries in `sys.path`. The REPL and
+source-runner start relative imports at the preferred storage root.
+
+```text
+/apps/weather/main.py
+/apps/weather/sensors.py
+/apps/weather/display/__init__.py
+```
+
+From `main.py`, both `import sensors` and `import display` resolve beside the
+script. Imported files pass through the same SolarOS path resolver as
+`open()`.
 
 The Python runtime package requires PSRAM. Hardware and network helpers are
 added only when the board/flavor includes their service package. For example,
@@ -45,6 +95,7 @@ Optional API groups follow these package gates:
 
 - `service.wifi`: top-level `wifi_status` and `solaros.wifi`
 - `network.mqtt`: `solaros.mqtt`
+- `network.http-client`: `solaros.http`
 - `network.base`: `solaros.net`
 - `network.ssh`: `solaros.ssh_keys`
 - `service.ble`: `solaros.ble`
@@ -277,6 +328,103 @@ while not solaros.should_exit():
     msg = solaros.mqtt.read(1000)
     if msg:
         print(msg["topic"], msg["payload"])
+```
+
+## `solaros.http`
+
+`solaros.http` provides bounded synchronous HTTP and HTTPS requests through the
+shared SolarOS HTTP client. It is present when `network.http-client` is
+compiled. HTTPS uses the firmware certificate bundle; no socket, TLS, or
+upstream MicroPython networking module is exposed.
+
+- `request(method, url[, body[, headers[, timeout_ms[, max_bytes[, follow_redirects]]]]])`
+- `get(url[, headers[, timeout_ms[, max_bytes[, follow_redirects]]]])`
+- `head(url[, headers[, timeout_ms[, max_bytes[, follow_redirects]]]])`
+- `post(url[, body[, headers[, timeout_ms[, max_bytes[, follow_redirects]]]]])`
+- `put(url[, body[, headers[, timeout_ms[, max_bytes[, follow_redirects]]]]])`
+- `patch(url[, body[, headers[, timeout_ms[, max_bytes[, follow_redirects]]]]])`
+- `delete(url[, body[, headers[, timeout_ms[, max_bytes[, follow_redirects]]]]])`
+- `stream_open(method, url[, body[, headers[, timeout_ms[, follow_redirects]]]])`
+- `stream_read(handle[, timeout_ms])`
+- `stream_close(handle)`
+- `stream_close_all()`
+
+Methods are case-insensitive in `request()`. Request bodies accept text or any
+readable buffer. URLs must use `http://` or `https://`. Headers are a dictionary
+of up to 16 string pairs and 8192 bytes total; names and values cannot contain
+line breaks. The defaults are a 10000 ms end-to-end timeout, a 65536-byte
+response-body limit, and redirect following. `max_bytes` accepts 0 through
+262144; zero collects metadata without retaining a body.
+
+The result is a dictionary containing `status_code`, binary `body`, `headers`,
+`content_length`, `bytes_received`, `duration_ms`, `truncated`, and
+`headers_truncated`. Header names retain the server's spelling and duplicate
+names use the last received value. `content_length` is `-1` when the server did
+not supply it. When a body exceeds `max_bytes`, SolarOS stops that response,
+returns the retained prefix, and sets `truncated=True`.
+
+HTTP error statuses such as 404 and 500 are normal results. Invalid requests,
+allocation failures, cancellation, deadlines, DNS failures, and transport
+errors raise `OSError("ESP_ERR_...")`. Exiting the Python app cancels an active
+request.
+
+`stream_open()` starts a native worker and returns an interpreter-owned opaque
+handle. Unlike `request()`, it has no end-to-end deadline: `timeout_ms` bounds
+each connect, header, write, or body-read operation and accepts 0 through 60000;
+zero selects the 10000 ms service default.
+`stream_read()` returns `None` when its wait expires. Otherwise it returns the
+next ordered event dictionary:
+
+- `header`: `status_code`, `name`, `value`, and `truncated`
+- `response`: `status_code` and `content_length`
+- `data`: `status_code` and up to 1024 binary bytes in `data`
+- `complete` or `error`: final status, content length, received byte count,
+  duration, cancellation/deadline flags, and ESP error details
+
+Each runtime can open two streams, with four streams globally. Each stream has
+an eight-event queue. If a script does not drain it, SolarOS terminates the
+stream with `ESP_ERR_NO_MEM`; it never silently drops body bytes. Handles close
+automatically at interpreter teardown. Always close them explicitly in
+`finally` so a completed stream releases its queue and handle immediately.
+
+The data boundary is a transport chunk, not an application record. For SSE,
+retain an incomplete line across `data` events and dispatch a message only at
+the blank line that terminates the SSE record.
+
+```python
+import solaros
+
+response = solaros.http.get("https://example.com/")
+print(response["status_code"], len(response["body"]))
+
+response = solaros.http.post(
+    "https://example.com/api",
+    b'{"state":"online"}',
+    {"Content-Type": "application/json"},
+)
+print(response["status_code"], response["body"])
+```
+
+```python
+handle = solaros.http.stream_open(
+    "GET",
+    "https://example.com/events",
+    None,
+    {"Accept": "text/event-stream"},
+)
+pending = b""
+try:
+    while not solaros.should_exit():
+        event = solaros.http.stream_read(handle, 250)
+        if event and event["type"] == "data":
+            pending += event["data"]
+            while b"\n" in pending:
+                line, pending = pending.split(b"\n", 1)
+                print(line.rstrip(b"\r"))
+        elif event and event["type"] in ("complete", "error"):
+            break
+finally:
+    solaros.http.stream_close(handle)
 ```
 
 ## `solaros.gpio`
@@ -709,6 +857,10 @@ Audio functions expose the microphone, speaker, and WAV service.
 - `cancel(request_id)`: cancel a queued or playing asynchronous tone.
 - `queue_status()`: return asynchronous tone worker, queue, and result counters.
 - `level(duration_ms)`: measure input level and return samples, peak, and average percent.
+- `capture(frames)`: capture 1 through 4096 native input frames and return
+  `(pcm, format)`. `pcm` contains interleaved little-endian signed-16 samples.
+  `format` contains `sample_format`, `sample_rate`, `channels`, and
+  `bits_per_sample`.
 - `loopback(duration_ms[, volume])`: run microphone-to-speaker loopback.
 - `wav_info(path)`: inspect a WAV file.
 - `record_wav(path, duration_ms)`: record a native WAV file.
@@ -724,6 +876,8 @@ solaros.audio.tone(880, 200, 40)
 sound = solaros.audio.tone_async(1175, 70)
 print(solaros.audio.queue_status())
 print(solaros.audio.level(500))
+pcm, format = solaros.audio.capture(1024)
+print(len(pcm), format)
 ```
 
 ## `solaros.synth`
@@ -862,6 +1016,62 @@ print(solaros.identity.format())
 ## `solaros.net`
 
 - `ping(host[, count[, timeout_ms[, interval_ms[, data_size]]]])`: ping a host and return transmit/receive statistics.
+- `tcp_connect(host, port[, timeout_ms])`: open an IPv4 TCP client and return a managed handle.
+- `tcp_send(handle, data[, timeout_ms])`: send the complete binary buffer.
+- `tcp_receive(handle[, max_bytes[, timeout_ms]])`: receive bytes, `None` on timeout, or `b""` when the peer closes.
+- `udp_open([local_port])`: open an IPv4 UDP endpoint; zero or an omitted port selects an ephemeral local port.
+- `udp_send(handle, host, port, data[, timeout_ms])`: send one complete datagram.
+- `udp_receive(handle[, max_bytes[, timeout_ms]])`: receive one datagram dictionary or `None` on timeout.
+- `websocket_connect(url[, subprotocol[, timeout_ms]])`: connect to a `ws://` or certificate-validated `wss://` URL and return a managed handle.
+- `websocket_send(handle, data[, text[, timeout_ms]])`: send one final binary frame, or one final text frame when `text` is true.
+- `websocket_receive(handle[, max_bytes[, timeout_ms]])`: receive one frame dictionary or `None` on timeout.
+- `close(handle)`: close one managed handle.
+- `close_all()`: close every handle owned by this interpreter run.
+- `limits()`: return current ownership, usage, limits, and blocking-policy fields.
+
+The TCP, UDP, and WebSocket calls are synchronous. They do not start a worker
+or invoke callbacks. The connect default is 10000 ms, the send and receive
+default is 1000 ms, and each call accepts a timeout from 0 through 60000 ms.
+A receive timeout is a normal `None` result. Connect, send, cancellation, DNS,
+TLS, protocol, and other transport failures raise `OSError`.
+
+Handles belong only to the current Python app or runner invocation. They cannot
+be shared with Lua, another Python invocation, or a background job. Handles are
+generation checked, so a closed handle does not become valid when its slot is
+reused. Normal exit, an exception, cancellation, and forced interpreter cleanup
+close all remaining handles before the VM is destroyed. Explicit `close()` in a
+`finally` block is still recommended when the script continues after an error.
+
+One interpreter run can hold four TCP, UDP, and WebSocket handles in total.
+SolarOS allows eight of these script handles globally. A send, receive buffer,
+or WebSocket frame is limited to 65536 bytes; one UDP datagram is limited to
+65507 bytes. `limits()` reports these constants and the current per-run and
+global handle counts. Opening past a limit raises an allocation-style
+`OSError` without evicting another owner.
+
+TCP and UDP socket waits check cancellation in slices of at most 50 ms. DNS
+resolution is a platform call and checks cancellation before and after it.
+WebSocket DNS, TCP/TLS setup, upgrade, and frame I/O use the supplied bounded
+transport deadline and check cancellation before and after each transport
+stage; cancellation can therefore take up to that stage's timeout. TCP and UDP
+use one end-to-end deadline per public operation, including DNS where SolarOS
+controls it. A WebSocket public call can contain multiple transport stages;
+each stage is separately bounded by the supplied timeout. Receive polling,
+reading, and draining share the remaining public-call deadline at the SolarOS
+layer.
+
+UDP receive dictionaries contain `data`, `address`, `port`, `truncated`, and
+`datagram_bytes`. WebSocket receive dictionaries contain `data`, `type`,
+`final`, `closed`, `truncated`, and `frame_bytes`. When a datagram or frame is
+larger than `max_bytes`, its retained prefix is returned with `truncated=True`;
+the rest of that message is discarded so the next receive starts at the next
+message. WebSocket types are `continuation`, `text`, `binary`, `close`, `ping`,
+`pong`, or `unknown`.
+
+These APIs are clients only. They do not expose TCP listen/accept, UDP
+multicast, custom WebSocket headers, custom certificate stores, or a raw socket
+object. WebSocket URLs support DNS names or IPv4 hosts, optional ports, paths,
+and query strings; URL credentials, fragments, and IPv6 literals are rejected.
 
 Example:
 
@@ -869,6 +1079,15 @@ Example:
 import solaros
 
 print(solaros.net.ping("example-host", 4))
+
+handle = solaros.net.websocket_connect("wss://example.com/events")
+try:
+    solaros.net.websocket_send(handle, b'{"ready":true}', True)
+    frame = solaros.net.websocket_receive(handle, 4096, 5000)
+    if frame is not None:
+        print(frame["type"], frame["data"])
+finally:
+    solaros.net.close(handle)
 ```
 
 ## `solaros.ssh_keys`

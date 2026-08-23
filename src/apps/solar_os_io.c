@@ -24,6 +24,7 @@
 #include "solar_os_resources.h"
 #include "solar_os_storage.h"
 #include "solar_os_tui.h"
+#include "solar_os_tui_widgets.h"
 #if SOLAR_OS_PACKAGE_SERVICE_ADC
 #include "solar_os_adc.h"
 #endif
@@ -148,31 +149,13 @@ static void io_set_error(const char *operation, esp_err_t err)
              esp_err_to_name(err));
 }
 
-static void io_add_clipped(size_t row,
-                           size_t col,
-                           size_t width,
-                           const char *text,
-                           uint8_t attr)
-{
-    if (width == 0 || text == NULL) {
-        return;
-    }
-    char clipped[192];
-    const size_t count = strnlen(text, width);
-    const size_t copy = count < sizeof(clipped) - 1U ? count : sizeof(clipped) - 1U;
-    memcpy(clipped, text, copy);
-    clipped[copy] = '\0';
-    solar_os_tui_addstr(&io.tui, row, col, clipped, attr);
-}
-
 static void io_write_row(size_t row, const char *text, uint8_t attr)
 {
     const size_t cols = solar_os_tui_cols(&io.tui);
     if (cols == 0) {
         return;
     }
-    solar_os_tui_fill(&io.tui, row, 0, 1, cols, ' ', attr);
-    io_add_clipped(row, 0, cols, text, attr);
+    solar_os_tui_write_cell(&io.tui, row, 0, cols, text, attr);
 }
 
 static size_t io_expansion_pin_count(void)
@@ -498,7 +481,7 @@ static void io_render_title(void)
                       cols,
                       ' ',
                       SOLAR_OS_TUI_ATTR_INVERSE | SOLAR_OS_TUI_ATTR_BOLD);
-    io_add_clipped(0,
+    solar_os_tui_write_cell(&io.tui, 0,
                    0,
                    cols,
                    title,
@@ -660,7 +643,7 @@ static void io_render_layout(void)
             }
             const bool is_selected = pin.row == selected.row &&
                 pin.column == selected.column;
-            io_add_clipped(tui_row,
+            solar_os_tui_write_cell(&io.tui, tui_row,
                            screen_column * cell_width,
                            cell_width,
                            cell,
@@ -884,21 +867,11 @@ static void io_render_browse(void)
     }
     if (rows >= 2U) {
         io_write_row(rows - 2U, io.message, SOLAR_OS_TUI_ATTR_NORMAL);
-        solar_os_tui_fill(&io.tui,
-                          rows - 1U,
-                          0,
-                          1,
-                          cols,
-                          ' ',
-                          SOLAR_OS_TUI_ATTR_INVERSE);
-        io_add_clipped(
-            rows - 1U,
-            0,
-            cols,
+        solar_os_tui_draw_help(
+            &io.tui,
             io.view == IO_VIEW_LAYOUT
                 ? " Tab views  arrows move  Enter actions  N new bus  R refresh  Q exit"
-                : " Tab views  arrows select  Enter actions  N new bus  R refresh  Q exit",
-            SOLAR_OS_TUI_ATTR_INVERSE);
+                : " Tab views  arrows select  Enter actions  N new bus  R refresh  Q exit");
     }
     solar_os_tui_refresh(&io.tui);
 }
@@ -1318,18 +1291,8 @@ static void io_render_actions(void)
                      i == io.action_selected ? SOLAR_OS_TUI_ATTR_INVERSE : SOLAR_OS_TUI_ATTR_NORMAL);
     }
     if (rows > 0) {
-        solar_os_tui_fill(&io.tui,
-                          rows - 1U,
-                          0,
-                          1,
-                          cols,
-                          ' ',
-                          SOLAR_OS_TUI_ATTR_INVERSE);
-        io_add_clipped(rows - 1U,
-                       0,
-                       cols,
-                       " arrows select  Enter apply  Esc back",
-                       SOLAR_OS_TUI_ATTR_INVERSE);
+        solar_os_tui_draw_help(&io.tui,
+                               " arrows select  Enter apply  Esc back");
     }
     solar_os_tui_refresh(&io.tui);
 }
@@ -1518,8 +1481,8 @@ static void io_render_protocols(void)
                      i == io.protocol_selected ? SOLAR_OS_TUI_ATTR_INVERSE : SOLAR_OS_TUI_ATTR_NORMAL);
     }
     if (rows > 0) {
-        solar_os_tui_fill(&io.tui, rows - 1U, 0, 1, cols, ' ', SOLAR_OS_TUI_ATTR_INVERSE);
-        io_add_clipped(rows - 1U, 0, cols, " arrows select  Enter continue  Esc back", SOLAR_OS_TUI_ATTR_INVERSE);
+        solar_os_tui_draw_help(&io.tui,
+                               " arrows select  Enter continue  Esc back");
     }
     solar_os_tui_refresh(&io.tui);
 }
@@ -1670,14 +1633,11 @@ static void io_render_form(void)
         io_write_row(rows - 2U, io.message, SOLAR_OS_TUI_ATTR_NORMAL);
     }
     if (rows > 0) {
-        solar_os_tui_fill(&io.tui, rows - 1U, 0, 1, cols, ' ', SOLAR_OS_TUI_ATTR_INVERSE);
-        io_add_clipped(rows - 1U,
-                       0,
-                       cols,
+        solar_os_tui_draw_help(
+            &io.tui,
                        io.form.editing_name
                            ? " type name  Enter accept  Esc cancel"
-                           : " arrows fields/values  Enter edit/create  Esc back",
-                       SOLAR_OS_TUI_ATTR_INVERSE);
+                           : " arrows fields/values  Enter edit/create  Esc back");
     }
     solar_os_tui_set_cursor_visible(&io.tui, io.form.editing_name);
     solar_os_tui_refresh(&io.tui);
@@ -1937,8 +1897,7 @@ static void io_render_confirm(void)
     io_write_row(2, prompt, SOLAR_OS_TUI_ATTR_BOLD);
     io_write_row(4, " This releases its controller and signal pins.", SOLAR_OS_TUI_ATTR_NORMAL);
     if (rows > 0) {
-        solar_os_tui_fill(&io.tui, rows - 1U, 0, 1, cols, ' ', SOLAR_OS_TUI_ATTR_INVERSE);
-        io_add_clipped(rows - 1U, 0, cols, " Y remove  N/Esc cancel", SOLAR_OS_TUI_ATTR_INVERSE);
+        solar_os_tui_draw_help(&io.tui, " Y remove  N/Esc cancel");
     }
     solar_os_tui_refresh(&io.tui);
 }
@@ -1977,11 +1936,8 @@ static void io_render(void)
                                                     SOLAR_OS_TUI_ATTR_NORMAL);
         }
         if (rows > 0U) {
-            solar_os_tui_fill(&io.tui, rows - 1U, 0, 1, cols, ' ',
-                              SOLAR_OS_TUI_ATTR_INVERSE);
-            io_add_clipped(rows - 1U, 0, cols,
-                           " arrows select  Enter apply  Esc back",
-                           SOLAR_OS_TUI_ATTR_INVERSE);
+            solar_os_tui_draw_help(&io.tui,
+                                   " arrows select  Enter apply  Esc back");
         }
         solar_os_tui_refresh(&io.tui);
         break;
@@ -2387,11 +2343,10 @@ static esp_err_t io_start(solar_os_context_t *ctx)
     if (err != ESP_OK) {
         return err;
     }
-    err = solar_os_tui_begin(&io.tui, ctx);
+    err = solar_os_tui_screen_begin(&io.tui, ctx);
     if (err != ESP_OK) {
         return err;
     }
-    (void)solar_os_tui_enable_diff(&io.tui, true);
     solar_os_tui_set_cursor_visible(&io.tui, false);
     io_render();
     return ESP_OK;

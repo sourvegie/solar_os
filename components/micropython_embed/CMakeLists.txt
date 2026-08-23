@@ -1,5 +1,8 @@
-file(GLOB_RECURSE MICROPYTHON_EMBED_SRCS
-    "micropython_embed/*.c"
+file(GLOB MICROPYTHON_EMBED_SRCS
+    "micropython_embed/py/*.c"
+    "micropython_embed/extmod/*.c"
+    "micropython_embed/shared/runtime/*.c"
+    "micropython_embed/port/*.c"
 )
 
 idf_component_register(
@@ -8,6 +11,7 @@ idf_component_register(
         "."
         "micropython_embed"
         "micropython_embed/port"
+    PRIV_REQUIRES esp_hw_support
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE

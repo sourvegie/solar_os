@@ -15,6 +15,7 @@
 #include "solar_os_radio.h"
 #include "solar_os_shell_common.h"
 #include "solar_os_tui.h"
+#include "solar_os_tui_widgets.h"
 
 #define RADIO_TUI_STATUS_MAX 96
 #define RADIO_TUI_EDIT_MAX 64
@@ -88,32 +89,6 @@ static void radio_tui_set_status(const char *status)
 static size_t radio_tui_visible_width(size_t cols, size_t start_col)
 {
     return start_col < cols ? cols - start_col : 0;
-}
-
-static void radio_tui_write_cell(size_t row,
-                                 size_t col,
-                                 size_t width,
-                                 const char *text,
-                                 uint8_t attr)
-{
-    char clipped[RADIO_TUI_STATUS_MAX];
-    size_t len = 0;
-
-    if (width == 0) {
-        return;
-    }
-
-    solar_os_tui_fill(&radio_tui.tui, row, col, 1, width, ' ', attr);
-    if (text == NULL || text[0] == '\0') {
-        return;
-    }
-
-    while (text[len] != '\0' && len + 1 < sizeof(clipped) && len < width) {
-        clipped[len] = text[len];
-        len++;
-    }
-    clipped[len] = '\0';
-    solar_os_tui_addstr(&radio_tui.tui, row, col, clipped, attr);
 }
 
 static bool radio_tui_current(solar_os_radio_info_t *info, solar_os_radio_status_t *status)
@@ -479,14 +454,14 @@ static void radio_tui_render(void)
         split = cols > 2 ? cols / 2 : 1;
     }
 
-    radio_tui_write_cell(0,
+    solar_os_tui_write_cell(&radio_tui.tui, 0,
                          0,
                          split,
                          "radio",
                          SOLAR_OS_TUI_ATTR_BOLD | SOLAR_OS_TUI_ATTR_INVERSE);
     if (cols > split) {
         solar_os_tui_vrule(tui, 0, split, rows, 1, SOLAR_OS_TUI_ATTR_NORMAL);
-        radio_tui_write_cell(0,
+        solar_os_tui_write_cell(&radio_tui.tui, 0,
                              split + 1,
                              radio_tui_visible_width(cols, split + 1),
                              "value",
@@ -496,15 +471,15 @@ static void radio_tui_render(void)
     const size_t footer_row = rows - 1U;
     if (!has_radio) {
         if (rows > 1) {
-            radio_tui_write_cell(1, 0, split, "device", SOLAR_OS_TUI_ATTR_NORMAL);
-            radio_tui_write_cell(1,
+            solar_os_tui_write_cell(&radio_tui.tui, 1, 0, split, "device", SOLAR_OS_TUI_ATTR_NORMAL);
+            solar_os_tui_write_cell(&radio_tui.tui, 1,
                                  split + 1,
                                  radio_tui_visible_width(cols, split + 1),
                                  "none",
                                  SOLAR_OS_TUI_ATTR_NORMAL);
         }
         if (rows > 1) {
-            radio_tui_write_cell(footer_row, 0, cols, "esc exits", SOLAR_OS_TUI_ATTR_INVERSE);
+            solar_os_tui_draw_help(&radio_tui.tui, "esc exits");
         }
         solar_os_tui_set_cursor_visible(tui, false);
         solar_os_tui_refresh(tui);
@@ -546,9 +521,9 @@ static void radio_tui_render(void)
             radio_tui_current_value((radio_tui_item_t)item_index, &info, &status, value, sizeof(value));
         }
 
-        radio_tui_write_cell(row, 0, split, radio_tui_items[item_index].label, label_attr);
+        solar_os_tui_write_cell(&radio_tui.tui, row, 0, split, radio_tui_items[item_index].label, label_attr);
         if (value_width > 0) {
-            radio_tui_write_cell(row, value_col, value_width, value, value_attr);
+            solar_os_tui_write_cell(&radio_tui.tui, row, value_col, value_width, value, value_attr);
         }
     }
 
@@ -556,7 +531,7 @@ static void radio_tui_render(void)
         radio_tui.status :
         (radio_tui.editing ? "enter saves, esc cancels" : "enter edits, arrows cycle, esc exits");
     if (rows > 1) {
-        radio_tui_write_cell(footer_row, 0, cols, footer, SOLAR_OS_TUI_ATTR_INVERSE);
+        solar_os_tui_draw_help(&radio_tui.tui, footer);
     }
 
     if (edit_cursor_visible && value_width > 0) {
@@ -890,11 +865,10 @@ static esp_err_t radio_tui_start(solar_os_context_t *ctx)
     memset(&radio_tui, 0, sizeof(radio_tui));
     radio_tui.ctx = ctx;
 
-    const esp_err_t err = solar_os_tui_begin(&radio_tui.tui, ctx);
+    const esp_err_t err = solar_os_tui_screen_begin(&radio_tui.tui, ctx);
     if (err != ESP_OK) {
         return err;
     }
-    (void)solar_os_tui_enable_diff(&radio_tui.tui, true);
     radio_tui_set_status("enter edits, arrows cycle, esc exits");
     solar_os_tui_set_cursor_visible(&radio_tui.tui, false);
     radio_tui_render();

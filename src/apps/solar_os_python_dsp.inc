@@ -95,7 +95,7 @@ static mp_obj_t solaros_dsp_dot(mp_obj_t a_object, mp_obj_t b_object)
     }
     int64_t value = 0;
     python_check_esp(solar_os_dsp_dot_s16(a.buf, b.buf, count, &value));
-    return mp_obj_new_int_from_ll(value);
+    return python_i64_to_obj(value);
 }
 MP_DEFINE_CONST_FUN_OBJ_2(solaros_dsp_dot_obj, solaros_dsp_dot);
 

@@ -16,6 +16,7 @@
 #include "solar_os_memory.h"
 #include "solar_os_storage.h"
 #include "solar_os_tui.h"
+#include "solar_os_tui_widgets.h"
 
 #define SHEET_MAX_COLS 32U
 #define SHEET_CELL_MAX 72U
@@ -309,90 +310,9 @@ static esp_err_t sheet_index_file(void)
     return ESP_OK;
 }
 
-static size_t sheet_utf8_char_len(unsigned char ch)
-{
-    if (ch < 0x80U) {
-        return 1;
-    }
-    if ((ch & 0xe0U) == 0xc0U) {
-        return 2;
-    }
-    if ((ch & 0xf0U) == 0xe0U) {
-        return 3;
-    }
-    if ((ch & 0xf8U) == 0xf0U) {
-        return 4;
-    }
-    return 1;
-}
-
-static void sheet_clip_text(const char *text, size_t cells, char *out, size_t out_len)
-{
-    if (out == NULL || out_len == 0) {
-        return;
-    }
-    out[0] = '\0';
-    if (text == NULL || cells == 0) {
-        return;
-    }
-
-    size_t in = 0;
-    size_t out_pos = 0;
-    size_t used_cells = 0;
-    while (text[in] != '\0' && used_cells < cells && out_pos + 1U < out_len) {
-        size_t char_len = sheet_utf8_char_len((unsigned char)text[in]);
-        if (char_len == 0 || out_pos + char_len >= out_len) {
-            break;
-        }
-        for (size_t i = 1; i < char_len; i++) {
-            if (((unsigned char)text[in + i] & 0xc0U) != 0x80U) {
-                char_len = 1;
-                break;
-            }
-        }
-        if (char_len == 1 && !sheet_is_printable((uint8_t)text[in])) {
-            out[out_pos++] = '.';
-            in++;
-        } else {
-            memcpy(&out[out_pos], &text[in], char_len);
-            out_pos += char_len;
-            in += char_len;
-        }
-        used_cells++;
-    }
-    out[out_pos] = '\0';
-}
-
-static void sheet_write_cell(size_t row,
-                             size_t col,
-                             size_t width,
-                             const char *text,
-                             uint8_t attr)
-{
-    const size_t rows = solar_os_tui_rows(&sheet.tui);
-    const size_t cols = solar_os_tui_cols(&sheet.tui);
-    char clipped[SHEET_LINE_MAX];
-
-    if (row >= rows || col >= cols || width == 0) {
-        return;
-    }
-    if (col + width > cols) {
-        width = cols - col;
-    }
-    if (width == 0) {
-        return;
-    }
-
-    solar_os_tui_fill(&sheet.tui, row, col, 1, width, ' ', attr);
-    sheet_clip_text(text, width, clipped, sizeof(clipped));
-    if (clipped[0] != '\0') {
-        solar_os_tui_addstr(&sheet.tui, row, col, clipped, attr);
-    }
-}
-
 static void sheet_write_line(size_t row, const char *text, uint8_t attr)
 {
-    sheet_write_cell(row, 0, solar_os_tui_cols(&sheet.tui), text, attr);
+    solar_os_tui_write_cell(&sheet.tui, row, 0, solar_os_tui_cols(&sheet.tui), text, attr);
 }
 
 static size_t sheet_body_rows(void)
@@ -474,7 +394,7 @@ static void sheet_render_footer(void)
 
     const size_t rows = solar_os_tui_rows(&sheet.tui);
     if (rows > 0) {
-        sheet_write_line(rows - 1U, footer, SOLAR_OS_TUI_ATTR_INVERSE);
+        solar_os_tui_draw_help(&sheet.tui, footer);
     }
 }
 
@@ -513,11 +433,11 @@ static void sheet_render(solar_os_context_t *ctx)
         return;
     }
 
-    sheet_write_cell(1, 0, SHEET_ROWNUM_WIDTH, "#", SOLAR_OS_TUI_ATTR_BOLD);
+    solar_os_tui_write_cell(&sheet.tui, 1, 0, SHEET_ROWNUM_WIDTH, "#", SOLAR_OS_TUI_ATTR_BOLD);
     const size_t visible_cols = sheet_visible_cols();
     for (size_t c = 0; c < visible_cols && sheet.col_offset + c < sheet.col_count; c++) {
         const size_t col = sheet.col_offset + c;
-        sheet_write_cell(1,
+        solar_os_tui_write_cell(&sheet.tui, 1,
                          SHEET_ROWNUM_WIDTH + (c * SHEET_CELL_WIDTH),
                          SHEET_CELL_WIDTH,
                          sheet.headers[col],
@@ -539,7 +459,7 @@ static void sheet_render(solar_os_context_t *ctx)
 
         char row_number[SHEET_ROWNUM_WIDTH + 1U];
         snprintf(row_number, sizeof(row_number), "%u", (unsigned)(row + 1U));
-        sheet_write_cell(2U + r,
+        solar_os_tui_write_cell(&sheet.tui, 2U + r,
                          0,
                          SHEET_ROWNUM_WIDTH,
                          row_number,
@@ -548,7 +468,7 @@ static void sheet_render(solar_os_context_t *ctx)
         for (size_t c = 0; c < visible_cols && sheet.col_offset + c < sheet.col_count; c++) {
             const size_t col = sheet.col_offset + c;
             const bool active = row == sheet.cursor_row && col == sheet.cursor_col;
-            sheet_write_cell(2U + r,
+            solar_os_tui_write_cell(&sheet.tui, 2U + r,
                              SHEET_ROWNUM_WIDTH + (c * SHEET_CELL_WIDTH),
                              SHEET_CELL_WIDTH,
                              col < cell_count ? sheet.cells[col] : "",
@@ -904,13 +824,12 @@ static esp_err_t sheet_start(solar_os_context_t *ctx)
         return ESP_ERR_NO_MEM;
     }
 
-    esp_err_t err = solar_os_tui_begin(&sheet.tui, ctx);
+    esp_err_t err = solar_os_tui_screen_begin(&sheet.tui, ctx);
     if (err != ESP_OK) {
         solar_os_memory_free(sheet_state);
         sheet_state = NULL;
         return err;
     }
-    (void)solar_os_tui_enable_diff(&sheet.tui, true);
 
     const int argc = solar_os_context_argc(ctx);
     if (argc != 2) {

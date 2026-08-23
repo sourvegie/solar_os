@@ -13,6 +13,7 @@
 #include "solar_os_memory.h"
 #include "solar_os_terminal.h"
 #include "solar_os_tui.h"
+#include "solar_os_tui_widgets.h"
 
 #define INBOX_APP_DETAIL_TEXT_MAX 640U
 #define INBOX_APP_LINE_MAX (SOLAR_OS_TERMINAL_MAX_COLS * 4U + 1U)
@@ -72,51 +73,6 @@ static size_t inbox_app_utf8_char_len(const char *text)
         return 4;
     }
     return 1;
-}
-
-static size_t inbox_app_clip_len(const char *text, size_t max_cols, size_t max_bytes)
-{
-    size_t bytes = 0;
-    size_t cols = 0;
-
-    if (text == NULL) {
-        return 0;
-    }
-    while (text[bytes] != '\0' && cols < max_cols) {
-        const size_t char_len = inbox_app_utf8_char_len(text + bytes);
-        if (char_len == 0 || bytes + char_len > max_bytes) {
-            break;
-        }
-        bytes += char_len;
-        cols++;
-    }
-    return bytes;
-}
-
-static void inbox_app_write_cell(size_t row,
-                                 size_t col,
-                                 size_t width,
-                                 const char *text,
-                                 uint8_t attr)
-{
-    const size_t rows = solar_os_tui_rows(&inbox_app.tui);
-    const size_t cols = solar_os_tui_cols(&inbox_app.tui);
-    char clipped[INBOX_APP_LINE_MAX];
-
-    if (row >= rows || col >= cols || width == 0) {
-        return;
-    }
-    if (col + width > cols) {
-        width = cols - col;
-    }
-
-    solar_os_tui_fill(&inbox_app.tui, row, col, 1, width, ' ', attr);
-    const size_t copy_len = inbox_app_clip_len(text, width, sizeof(clipped) - 1U);
-    memcpy(clipped, text, copy_len);
-    clipped[copy_len] = '\0';
-    if (copy_len > 0) {
-        solar_os_tui_addstr(&inbox_app.tui, row, col, clipped, attr);
-    }
 }
 
 static void inbox_app_flatten(char *text)
@@ -230,16 +186,13 @@ static size_t inbox_app_list_rows(void)
 
 static void inbox_app_ensure_visible(void)
 {
-    const size_t visible = inbox_app_list_rows();
-    if (visible == 0 || inbox_app.count == 0) {
-        inbox_app.top = 0;
-        return;
-    }
-    if (inbox_app.cursor < inbox_app.top) {
-        inbox_app.top = inbox_app.cursor;
-    } else if (inbox_app.cursor >= inbox_app.top + visible) {
-        inbox_app.top = inbox_app.cursor - visible + 1U;
-    }
+    solar_os_tui_viewport_t viewport = {
+        .cursor = inbox_app.cursor, .top = inbox_app.top,
+    };
+    solar_os_tui_viewport_reconcile(&viewport, inbox_app.count,
+                                    inbox_app_list_rows());
+    inbox_app.cursor = viewport.cursor;
+    inbox_app.top = viewport.top;
 }
 
 static void inbox_app_render_list(void)
@@ -254,11 +207,7 @@ static void inbox_app_render_list(void)
              "Inbox %u unread%s",
              (unsigned)inbox_app.status.unread,
              inbox_app.unread_only ? "  filtered" : "");
-    inbox_app_write_cell(0,
-                         0,
-                         cols,
-                         line,
-                         SOLAR_OS_TUI_ATTR_INVERSE | SOLAR_OS_TUI_ATTR_BOLD);
+    solar_os_tui_draw_title(&inbox_app.tui, line, NULL);
 
     const size_t visible = inbox_app_list_rows();
     for (size_t row = 0; row < visible; row++) {
@@ -266,7 +215,7 @@ static void inbox_app_render_list(void)
         if (index >= inbox_app.count) {
             const char *empty = row == 0 && inbox_app.count == 0 ?
                 (inbox_app.unread_only ? "No unread messages" : "Inbox is empty") : "";
-            inbox_app_write_cell(row + 1U, 0, cols, empty, SOLAR_OS_TUI_ATTR_NORMAL);
+            solar_os_tui_write_cell(&inbox_app.tui, row + 1U, 0, cols, empty, SOLAR_OS_TUI_ATTR_NORMAL);
             continue;
         }
 
@@ -288,7 +237,7 @@ static void inbox_app_render_list(void)
                  source,
                  summary[0] != '\0' ? ": " : "",
                  summary);
-        inbox_app_write_cell(row + 1U,
+        solar_os_tui_write_cell(&inbox_app.tui, row + 1U,
                              0,
                              cols,
                              line,
@@ -302,13 +251,9 @@ static void inbox_app_render_list(void)
                  "Enter open  d delete  u filter  m read  s sound:%s  q quit",
                  !inbox_app.status.sound_available ? "n/a" :
                      (inbox_app.status.sound_enabled ? "on" : "off"));
-        inbox_app_write_cell(rows - 1U,
-                             0,
-                             cols,
-                             inbox_app.feedback[0] != '\0' ?
-                                 inbox_app.feedback :
-                                 line,
-                             SOLAR_OS_TUI_ATTR_INVERSE);
+        solar_os_tui_draw_help(&inbox_app.tui,
+                               inbox_app.feedback[0] != '\0' ?
+                                   inbox_app.feedback : line);
     }
 }
 
@@ -438,14 +383,10 @@ static void inbox_app_render_detail(void)
              "Message %lu  %s",
              (unsigned long)inbox_app.detail.id,
              inbox_app.detail.source);
-    inbox_app_write_cell(0,
-                         0,
-                         cols,
-                         header,
-                         SOLAR_OS_TUI_ATTR_INVERSE | SOLAR_OS_TUI_ATTR_BOLD);
+    solar_os_tui_draw_title(&inbox_app.tui, header, NULL);
 
     for (size_t row = 0; row < visible; row++) {
-        inbox_app_write_cell(row + 1U, 0, cols, "", SOLAR_OS_TUI_ATTR_NORMAL);
+        solar_os_tui_write_cell(&inbox_app.tui, row + 1U, 0, cols, "", SOLAR_OS_TUI_ATTR_NORMAL);
     }
     while (inbox_app.detail_text[offset] != '\0' && logical_row < inbox_app.detail_scroll + visible) {
         const size_t next = inbox_app_next_wrapped_line(inbox_app.detail_text,
@@ -457,7 +398,7 @@ static void inbox_app_render_detail(void)
             break;
         }
         if (logical_row >= inbox_app.detail_scroll) {
-            inbox_app_write_cell(1U + logical_row - inbox_app.detail_scroll,
+            solar_os_tui_write_cell(&inbox_app.tui, 1U + logical_row - inbox_app.detail_scroll,
                                  0,
                                  cols,
                                  line,
@@ -468,13 +409,10 @@ static void inbox_app_render_detail(void)
     }
 
     if (rows > 0) {
-        inbox_app_write_cell(rows - 1U,
-                             0,
-                             cols,
-                             inbox_app.feedback[0] != '\0' ?
-                                 inbox_app.feedback :
-                                 "Left back  d delete  arrows scroll  m unread  q quit",
-                             SOLAR_OS_TUI_ATTR_INVERSE);
+        solar_os_tui_draw_help(
+            &inbox_app.tui,
+            inbox_app.feedback[0] != '\0' ? inbox_app.feedback :
+                "Left back  d delete  arrows scroll  m unread  q quit");
     }
 }
 
@@ -485,7 +423,7 @@ static void inbox_app_render(void)
     solar_os_tui_set_cursor_visible(&inbox_app.tui, false);
     solar_os_tui_clear(&inbox_app.tui);
     if (rows < 3U || cols < 12U) {
-        inbox_app_write_cell(0, 0, cols, "inbox: terminal too small", SOLAR_OS_TUI_ATTR_NORMAL);
+        solar_os_tui_draw_too_small(&inbox_app.tui, "inbox");
     } else if (inbox_app.view == INBOX_APP_DETAIL) {
         inbox_app_render_detail();
     } else {
@@ -635,13 +573,12 @@ static esp_err_t inbox_app_start(solar_os_context_t *ctx)
         return ESP_ERR_NO_MEM;
     }
 
-    const esp_err_t err = solar_os_tui_begin(&inbox_app.tui, ctx);
+    const esp_err_t err = solar_os_tui_screen_begin(&inbox_app.tui, ctx);
     if (err != ESP_OK) {
         solar_os_memory_free(inbox_app.entries);
         memset(&inbox_app, 0, sizeof(inbox_app));
         return err;
     }
-    (void)solar_os_tui_enable_diff(&inbox_app.tui, true);
     inbox_app_refresh();
     inbox_app_render();
     return ESP_OK;

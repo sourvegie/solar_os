@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "esp_netif.h"
 
 #define SOLAR_OS_WIFI_SSID_MAX 32
 #define SOLAR_OS_WIFI_PASSWORD_MAX 64
@@ -80,6 +81,7 @@ esp_err_t solar_os_wifi_start(void);
 esp_err_t solar_os_wifi_stop(void);
 esp_err_t solar_os_wifi_prepare_sleep(void);
 esp_err_t solar_os_wifi_resume(void);
+esp_netif_t *solar_os_wifi_get_sta_netif(void);
 esp_err_t solar_os_wifi_connect(const char *ssid, const char *password);
 esp_err_t solar_os_wifi_connect_saved(void);
 esp_err_t solar_os_wifi_disconnect(void);

@@ -1375,6 +1375,14 @@ static bool process_addressed_session_requests(solar_os_session_entry_t *session
             solar_os_shell_io_flush(io);
         }
     }
+    if (solar_os_context_take_suspend_request(session_state.ctx)) {
+        solar_os_shell_io_t *io = solar_os_context_shell_io(session_state.ctx);
+        if (io != NULL) {
+            solar_os_shell_io_writeln(io,
+                                      "suspend is unavailable from a detached display");
+            solar_os_shell_io_flush(io);
+        }
+    }
 
     solar_os_session_request_type_t request = SOLAR_OS_SESSION_REQUEST_NONE;
     uint8_t requested_id = 0;
@@ -1435,6 +1443,7 @@ static void process_inactive_session_requests(solar_os_session_entry_t *session)
                       app_display_name(requested_app));
     }
     (void)solar_os_context_take_sleep_request(session_state.ctx);
+    (void)solar_os_context_take_suspend_request(session_state.ctx);
 
     solar_os_session_request_type_t request = SOLAR_OS_SESSION_REQUEST_NONE;
     uint8_t requested_id = 0;

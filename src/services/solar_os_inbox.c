@@ -93,8 +93,8 @@ static bool inbox_sound_available(void)
 
 static void inbox_load_sound_setting(void)
 {
-    inbox_sound_enabled = false;
-    if (!inbox_sound_available()) {
+    inbox_sound_enabled = inbox_sound_available();
+    if (!inbox_sound_enabled) {
         return;
     }
 

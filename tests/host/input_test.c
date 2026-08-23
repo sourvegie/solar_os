@@ -85,6 +85,7 @@ int main(void)
     assert(solar_os_input_init() == ESP_OK);
     assert(translate(0x04, 0, false).key == 'a');
     assert(translate(0x04, SOLAR_OS_INPUT_MOD_LEFT_SHIFT, false).key == 'A');
+    assert(translate(0x19, SOLAR_OS_INPUT_MOD_LEFT_CTRL, false).key == 0x16);
     assert(translate(0x30, SOLAR_OS_INPUT_MOD_LEFT_CTRL, false).key ==
            SOLAR_OS_KEY_APP_EXIT);
     assert(solar_os_input_set_keyboard_layout(SOLAR_OS_INPUT_KEYBOARD_LAYOUT_DE) == ESP_OK);
@@ -114,6 +115,16 @@ int main(void)
     assert(solar_os_input_source_open("keyboard", &keyboard) == ESP_OK);
     assert(solar_os_input_source_open("buttons", &buttons) == ESP_OK);
     assert(keyboard != buttons);
+    assert(solar_os_input_keyboard_count() == 0);
+
+    solar_os_input_source_t keyboard_status = SOLAR_OS_INPUT_SOURCE_INVALID;
+    assert(solar_os_input_keyboard_source_open("keyboard-status",
+                                               false,
+                                               &keyboard_status) == ESP_OK);
+    assert(solar_os_input_keyboard_count() == 0);
+    assert(solar_os_input_keyboard_source_set_ready(keyboard_status, true) == ESP_OK);
+    assert(solar_os_input_keyboard_count() == 1);
+    assert(solar_os_input_keyboard_source_set_ready(buttons, true) == ESP_ERR_INVALID_ARG);
 
     assert(solar_os_input_write_hid_key(keyboard,
                                         0x2c,
@@ -201,6 +212,27 @@ int main(void)
     event = read_one_event();
     assert(event.action == SOLAR_OS_INPUT_KEY_RELEASE);
 
+    now_us = 500000;
+    assert(solar_os_input_write_key(keyboard,
+                                    0x28,
+                                    0x28,
+                                    SOLAR_OS_KEY_ENTER,
+                                    0,
+                                    SOLAR_OS_INPUT_KEY_PRESS) == ESP_OK);
+    event = read_one_event();
+    assert(event.action == SOLAR_OS_INPUT_KEY_PRESS);
+    assert(event.key == SOLAR_OS_KEY_ENTER);
+    now_us = 1000000;
+    assert(solar_os_input_read_events(&event, 1) == 0);
+    assert(solar_os_input_write_key(keyboard,
+                                    0x28,
+                                    0x28,
+                                    SOLAR_OS_KEY_ENTER,
+                                    0,
+                                    SOLAR_OS_INPUT_KEY_RELEASE) == ESP_OK);
+    event = read_one_event();
+    assert(event.action == SOLAR_OS_INPUT_KEY_RELEASE);
+
     assert(solar_os_input_write_key(keyboard,
                                     0x2b,
                                     0x2b,
@@ -230,6 +262,8 @@ int main(void)
     assert(solar_os_input_get_pressed(pressed, 2) == 2);
     solar_os_input_source_close(keyboard);
     assert(solar_os_input_get_pressed(pressed, 2) == 0);
+    solar_os_input_source_close(keyboard_status);
+    assert(solar_os_input_keyboard_count() == 0);
 
     assert(solar_os_input_set_repeat(20, 300) == ESP_OK);
     uint16_t rate = 0;

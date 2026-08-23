@@ -83,6 +83,9 @@
 #include "solar_os_time.h"
 #include "solar_os_uart.h"
 #include "solar_os_wifi.h"
+#if SOLAR_OS_PACKAGE_SERVICE_WIREGUARD
+#include "solar_os_wireguard.h"
+#endif
 #include "solar_os_board.h"
 
 #ifndef SOLAR_OS_BOARD_PIN_KEY
@@ -241,7 +244,7 @@ static void print_boot_summary(void)
                   (unsigned)heap_caps_get_total_size(MALLOC_CAP_SPIRAM));
 #endif
 
-    char caps[192];
+    char caps[SOLAR_OS_BOARD_CAPABILITIES_TEXT_MAX];
     solar_os_board_capabilities_format(caps, sizeof(caps));
     SOLAR_OS_LOGI(TAG, "Board capabilities: %s", caps);
 
@@ -437,6 +440,81 @@ static void resume_display_after_sleep(uint32_t now_ms)
 #endif
 }
 
+static void enter_suspend(const char *reason)
+{
+    if (!board_has(SOLAR_OS_BOARD_CAP_KEY)) {
+        SOLAR_OS_LOGW(TAG, "%s: suspend needs a KEY resume source", reason);
+        return;
+    }
+
+    solar_os_power_status_t status;
+    solar_os_power_get_status(&status);
+    if (status.suspend_active) {
+        return;
+    }
+
+    update_status();
+    draw_terminal_if_needed();
+
+    esp_err_t err = solar_os_power_begin_suspend();
+    if (err != ESP_OK) {
+        SOLAR_OS_LOGW(TAG, "%s: suspend power policy failed: %s",
+                      reason, esp_err_to_name(err));
+        return;
+    }
+
+    err = solar_os_display_suspend_primary();
+    if (err != ESP_OK && err != ESP_ERR_NOT_SUPPORTED) {
+        SOLAR_OS_LOGW(TAG, "%s: display suspend failed: %s",
+                      reason, esp_err_to_name(err));
+        (void)solar_os_power_end_suspend();
+        return;
+    }
+
+    session_overlay_until_ms = 0;
+    session_overlay_title[0] = '\0';
+    SOLAR_OS_LOGI(TAG,
+                  "%s: suspended; profile=lowpower restore=%s",
+                  reason,
+                  solar_os_power_profile_name(status.profile));
+}
+
+static void exit_suspend(const char *reason)
+{
+    solar_os_power_status_t status;
+    solar_os_power_get_status(&status);
+    if (!status.suspend_active) {
+        return;
+    }
+
+    const esp_err_t power_err = solar_os_power_end_suspend();
+    if (power_err != ESP_OK) {
+        SOLAR_OS_LOGW(TAG, "%s: profile restore failed: %s",
+                      reason, esp_err_to_name(power_err));
+    }
+
+    const esp_err_t display_err = solar_os_display_resume_primary();
+    if (display_err != ESP_OK && display_err != ESP_ERR_NOT_SUPPORTED) {
+        SOLAR_OS_LOGW(TAG, "%s: display resume failed: %s",
+                      reason, esp_err_to_name(display_err));
+    }
+
+    const uint32_t now_ms = millis_u32();
+    solar_os_power_note_activity(now_ms);
+    last_app_tick_ms = now_ms;
+    last_status_update_ms = 0;
+    update_status();
+    if (solar_os_context_graphics_active(&os_ctx)) {
+        dispatch_app_resume(now_ms);
+    } else if (terminal != NULL) {
+        terminal->dirty = true;
+        draw_terminal_if_needed();
+    }
+    SOLAR_OS_LOGI(TAG, "%s: resumed; profile=%s",
+                  reason,
+                  solar_os_power_profile_name(status.profile));
+}
+
 static esp_err_t key_button_configure_gpio(void)
 {
     const gpio_config_t key_config = {
@@ -619,6 +697,15 @@ static void enter_light_sleep(const char *reason)
     }
 #endif
 
+#if SOLAR_OS_PACKAGE_SERVICE_WIREGUARD
+    const esp_err_t wireguard_sleep_err = solar_os_wireguard_prepare_sleep();
+    if (wireguard_sleep_err != ESP_OK) {
+        SOLAR_OS_LOGW(TAG,
+                      "WireGuard sleep prepare failed: %s",
+                      esp_err_to_name(wireguard_sleep_err));
+    }
+#endif
+
 #if SOLAR_OS_PACKAGE_SERVICE_WIFI
     if (board_has(SOLAR_OS_BOARD_CAP_WIFI)) {
         const esp_err_t wifi_sleep_err = solar_os_wifi_prepare_sleep();
@@ -668,20 +755,28 @@ static void enter_light_sleep(const char *reason)
         }
     }
 #endif
-#if SOLAR_OS_PACKAGE_SERVICE_ESPNOW
-    const esp_err_t espnow_resume_err = solar_os_espnow_resume();
-    if (espnow_resume_err != ESP_OK) {
-        SOLAR_OS_LOGW(TAG,
-                      "ESP-NOW resume failed: %s",
-                      esp_err_to_name(espnow_resume_err));
-    }
-#endif
 #if SOLAR_OS_PACKAGE_SERVICE_BLE
     if (board_has(SOLAR_OS_BOARD_CAP_BLE)) {
         if (solar_os_ble_keyboard_enabled_for_current_boot()) {
             solar_os_ble_keyboard_resume();
             radio_resumed = true;
         }
+    }
+#endif
+#if SOLAR_OS_PACKAGE_SERVICE_WIREGUARD
+    const esp_err_t wireguard_resume_err = solar_os_wireguard_resume();
+    if (wireguard_resume_err != ESP_OK) {
+        SOLAR_OS_LOGW(TAG,
+                      "WireGuard resume failed: %s",
+                      esp_err_to_name(wireguard_resume_err));
+    }
+#endif
+#if SOLAR_OS_PACKAGE_SERVICE_ESPNOW
+    const esp_err_t espnow_resume_err = solar_os_espnow_resume();
+    if (espnow_resume_err != ESP_OK) {
+        SOLAR_OS_LOGW(TAG,
+                      "ESP-NOW resume failed: %s",
+                      esp_err_to_name(espnow_resume_err));
     }
 #endif
     if (radio_resumed) {
@@ -698,12 +793,20 @@ static void handle_key_short_press(void)
     solar_os_power_status_t power_status;
     solar_os_power_get_status(&power_status);
 
+    if (power_status.suspend_active) {
+        exit_suspend("KEY short press");
+        return;
+    }
+
     switch (power_status.key_action) {
     case SOLAR_OS_POWER_KEY_ACTION_OFF:
         SOLAR_OS_LOGI(TAG, "KEY short press: sleep disabled");
         break;
-    case SOLAR_OS_POWER_KEY_ACTION_LIGHT:
+    case SOLAR_OS_POWER_KEY_ACTION_SLEEP:
         enter_light_sleep("KEY short press");
+        break;
+    case SOLAR_OS_POWER_KEY_ACTION_SUSPEND:
+        enter_suspend("KEY short press");
         break;
     default:
         SOLAR_OS_LOGW(TAG, "KEY short press: unknown power action");
@@ -1074,18 +1177,37 @@ static void update_status(void)
 
 #if SOLAR_OS_PACKAGE_SERVICE_BLE
     if (board_has(SOLAR_OS_BOARD_CAP_BLE)) {
-        status.ble_connected = solar_os_ble_keyboard_is_connected();
-        status.ble_scanning = solar_os_ble_keyboard_is_scanning();
+        status.keyboard_scanning = solar_os_ble_keyboard_is_scanning();
     }
 #endif
-    if (board_has(SOLAR_OS_BOARD_CAP_SD)) {
-        status.sd_mounted = solar_os_storage_sd_is_mounted();
+    const size_t keyboard_count = solar_os_input_keyboard_count();
+    status.keyboard_count = keyboard_count > UINT8_MAX ? UINT8_MAX : (uint8_t)keyboard_count;
+    status.sd_mounted = solar_os_storage_sd_is_mounted();
+
+#if SOLAR_OS_PACKAGE_SERVICE_RADIO
+    status.radio_attached = solar_os_radio_count() > 0U;
+#endif
+
+#if SOLAR_OS_PACKAGE_JOB_RADIO_LINK || SOLAR_OS_PACKAGE_JOB_ESPNOW_LINK
+    solar_os_job_status_t link_job;
+#if SOLAR_OS_PACKAGE_JOB_RADIO_LINK
+    status.link_running =
+        solar_os_jobs_get_by_name("radio-link", &link_job) &&
+        link_job.state == SOLAR_OS_JOB_RUNNING;
+#endif
+#if SOLAR_OS_PACKAGE_JOB_ESPNOW_LINK
+    if (!status.link_running) {
+        status.link_running =
+            solar_os_jobs_get_by_name("espnow-link", &link_job) &&
+            link_job.state == SOLAR_OS_JOB_RUNNING;
     }
+#endif
+#endif
 
 #if SOLAR_OS_PACKAGE_SERVICE_AUDIO
     solar_os_audio_status_t audio;
-    if (board_has(SOLAR_OS_BOARD_CAP_AUDIO)) {
-        solar_os_audio_get_status(&audio);
+    solar_os_audio_get_status(&audio);
+    if (solar_os_audio_output_available()) {
         status.audio_enabled = true;
         status.audio_volume = audio.volume;
     }
@@ -1105,8 +1227,7 @@ static void update_status(void)
 #endif
 
     solar_os_datetime_t datetime;
-    if (board_has(SOLAR_OS_BOARD_CAP_RTC) &&
-        solar_os_time_get_datetime(&datetime) == ESP_OK &&
+    if (solar_os_time_get_datetime(&datetime) == ESP_OK &&
         solar_os_time_datetime_is_valid(&datetime) &&
         datetime.clock_integrity) {
         status.time_valid = true;
@@ -1204,6 +1325,17 @@ static void init_peripherals(void)
             SOLAR_OS_LOGI(TAG, "Wi-Fi disabled by saved boot setting");
         } else if (wifi_err != ESP_OK) {
             SOLAR_OS_LOGW(TAG, "Wi-Fi unavailable: %s", esp_err_to_name(wifi_err));
+        }
+    }
+#endif
+
+#if SOLAR_OS_PACKAGE_SERVICE_WIREGUARD
+    if (board_has(SOLAR_OS_BOARD_CAP_WIFI)) {
+        const esp_err_t wireguard_err = solar_os_wireguard_init();
+        if (wireguard_err != ESP_OK) {
+            SOLAR_OS_LOGW(TAG,
+                          "WireGuard unavailable: %s",
+                          esp_err_to_name(wireguard_err));
         }
     }
 #endif
@@ -1388,6 +1520,9 @@ static void process_app_requests(void)
 
     if (solar_os_context_take_sleep_request(&os_ctx)) {
         enter_light_sleep("shell sleep");
+    }
+    if (solar_os_context_take_suspend_request(&os_ctx)) {
+        enter_suspend("shell suspend");
     }
 
     solar_os_sessions_process_requests();

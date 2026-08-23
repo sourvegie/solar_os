@@ -792,9 +792,11 @@ esp_err_t solar_os_gateway_sync_publish(const solar_os_chat_event_t *event,
         }
     }
     chat_lock();
-    if ((event->type == SOLAR_OS_CHAT_EVENT_CHANNEL ||
-         event->type == SOLAR_OS_CHAT_EVENT_JOINED) &&
+    if (event->type == SOLAR_OS_CHAT_EVENT_CHANNEL &&
         event->channel[0] != '\0') {
+        (void)chat_add_channel_locked(event->channel, false);
+    } else if (event->type == SOLAR_OS_CHAT_EVENT_JOINED &&
+               event->channel[0] != '\0') {
         (void)chat_add_channel_locked(event->channel, true);
     } else if (event->type == SOLAR_OS_CHAT_EVENT_LEFT &&
                event->channel[0] != '\0') {

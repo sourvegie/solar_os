@@ -329,10 +329,11 @@ Graphical controls:
 
 ## chat
 
-Two-pane provider-neutral conversation client. The left pane lists gateway and
-radio conversations, the right pane shows bounded shared history, and the
-bottom line is the message/command input. It opens and remains useful offline;
-network or radio transport jobs connect independently.
+Tabbed provider-neutral conversation client. The Channels tab lists gateway and
+radio conversations. Enter selects a conversation and opens its bounded shared
+history on the Chat tab, which also contains the message/command input. The app
+opens and remains useful offline; network or radio transport jobs connect
+independently.
 
 Usage:
 
@@ -364,7 +365,8 @@ and reconnects with exponential backoff while remaining in the running state.
 Gateway setup and room lifecycle use `gateway status`, `gateway configure`,
 `gateway connect`, `gateway disconnect`, `gateway rooms`, `gateway join`,
 `gateway leave`, and `gateway delete`. Gateway synchronization runs only under
-the `gateway-sync` job name.
+the `gateway-sync` job name. Selecting a known gateway room in the Channels tab
+joins it automatically before opening the conversation.
 
 Conversation rows show provider, unread, and security state. Outbound rows show
 queued/sending/sent/delivered/failed state. Use `/new CONTACT_ID` to open a
@@ -387,9 +389,10 @@ In-app commands:
 
 Controls:
 
-- `Tab` changes focus between conversation list, messages, and input.
-- `Up`/`Down` navigate the focused pane or input history.
-- `Enter` sends input or opens the selected conversation.
+- `Tab` switches between the Channels and Chat tabs.
+- In Channels, `Up`/`Down` select a conversation and `Enter` joins a known
+  gateway room if necessary, then opens the Chat tab.
+- In Chat, `Up`/`Down` navigate input history and `Enter` sends input.
 - `Page Up`/`Page Down` scroll messages.
 - `Esc` or app-exit key exits.
 
@@ -746,9 +749,9 @@ Each list item occupies exactly one terminal row: unread/priority markers,
 local reception date and time, a compact source (`chat/general`, `email`, or
 `pocsag`), and as much of the message body preview as fits the screen.
 
-Optional notification sound is disabled by default. Press `s` in the Inbox or
+Notification sound is enabled by default on boards with audio. Press `s` in the Inbox or
 use `inbox notify on`, `inbox notify off`, or `inbox notify test`; the setting
-is persistent and is available only on boards with audio output.
+is persistent. Notification tones remain active while SolarOS is suspended.
 
 Usage:
 
@@ -980,7 +983,8 @@ Controls:
 ## notes
 
 Markdown-backed checklist and category manager. It stores unchecked and checked
-items and supports one level of category folding.
+items and supports one level of category folding. A persistent bottom help bar
+shows the available controls, with status or text input directly above it.
 
 Usage:
 
@@ -991,14 +995,17 @@ notes [file.md]
 Controls:
 
 - `Up`/`Down` navigate.
-- `Space` toggles an item.
+- `Space` toggles an item. After an active item is marked done, the selection
+  remains on the next active item when one is available.
 - `a` adds an unchecked item below the selected item. On a category, it adds the
   first item in that category; from the done section, it adds at the end of the
   active items.
 - `c` adds a category.
 - `Enter` edits the selected line.
 - `d` or `Delete` deletes the selected item/category.
-- `Shift+Up`/`Shift+Down` reorders items within a category.
+- `t` tidies the note by deleting all completed items.
+- `Shift+Up`/`Shift+Down` reorders items within a category or moves the selected
+  category together with all of its items.
 - `Left`/`Right` collapse/expand a category.
 - `q`, `Esc`, or app-exit key exits.
 
@@ -1067,17 +1074,18 @@ clears the loaded catalog from memory, and also removes the legacy hidden
 `.solar/playground` directory when present. Source and storage preferences are
 retained.
 
-The shell subcommands use the local catalog: `refresh` downloads and saves it,
-`reload` loads that saved copy without network access, `search` prints matches,
-`install` downloads and verifies an application by ID, and `run` launches an
-installed ID directly through its declared Python or Lua runtime without
-creating a Playground session. Tab completes installed catalog IDs after
-`playground install` and `playground run`. Arguments after the application ID
-are forwarded unchanged to the selected Python or Lua script. For example,
-`playground run qr-share --file /notes/wifi.txt` passes both options to QR
-Share. Opening the TUI reloads the saved catalog automatically and does not
-refresh it. At the top-level catalog tree, `Esc`, `q`, and the app-exit key exit
-Playground.
+The shell subcommands use the local catalog for browsing and installation:
+`refresh` downloads and saves it, `reload` loads that saved copy without network
+access, `search` prints matches, and `install` downloads and verifies an
+application by ID. `run` reads an installed application's own manifest, so it
+does not require a catalog reload. It launches the declared Python or Lua
+runtime without creating a Playground session. Installation also adds the app
+ID to the managed `/.shell/playground` aliases, so `qr-share --file
+/notes/wifi.txt` is equivalent to `playground run qr-share --file
+/notes/wifi.txt`. Uninstalling removes the generated alias. Arguments are
+forwarded unchanged to the selected script. Opening the TUI reloads the saved
+catalog automatically and does not refresh it. At the top-level catalog tree,
+`Esc`, `q`, and the app-exit key exit Playground.
 
 `playground storage` shows the persistent catalog and default application
 storage. Set it with `playground storage flash` or `playground storage sd`.
@@ -1231,9 +1239,11 @@ Usage:
 ssh [user@]host [port]
 ```
 
-SSH runs inline in the shell, so connection output remains in the terminal
-scrollback and disconnecting returns directly to the prompt. Remote terminal
-control sequences still work, including full-screen applications.
+On display shells, SSH owns a resumable terminal buffer. Switching to the
+SolarOS shell does not mix the local and remote scrollback, and switching back
+restores the SSH buffer. On UART and USB CDC port shells, SSH uses the shared
+port scrollback. Disconnecting returns directly to the local prompt. Remote
+terminal control sequences still work, including full-screen applications.
 
 Controls:
 

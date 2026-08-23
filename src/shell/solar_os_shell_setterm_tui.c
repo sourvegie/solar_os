@@ -12,6 +12,7 @@
 #include "solar_os_display.h"
 #include "solar_os_input.h"
 #include "solar_os_keys.h"
+#include "solar_os_power.h"
 #if SOLAR_OS_PACKAGE_SERVICE_OTA
 #include "solar_os_ota.h"
 #endif
@@ -20,6 +21,7 @@
 #include "solar_os_terminal.h"
 #include "solar_os_time.h"
 #include "solar_os_tui.h"
+#include "solar_os_tui_widgets.h"
 
 #define SETTERM_TUI_EDIT_MAX 256
 #define SETTERM_TUI_CURSOR_BLINK_MS 500
@@ -42,6 +44,7 @@ typedef enum {
     SETTERM_TUI_STATUSBAR,
     SETTERM_TUI_BRIGHTNESS,
     SETTERM_TUI_KEYBOARD,
+    SETTERM_TUI_POWERKEY,
     SETTERM_TUI_KEYRATE,
     SETTERM_TUI_TIMEZONE,
     SETTERM_TUI_STARTUP,
@@ -78,6 +81,7 @@ static const setterm_tui_item_def_t setterm_tui_items[] = {
     [SETTERM_TUI_STATUSBAR] = {.label = "statusbar"},
     [SETTERM_TUI_BRIGHTNESS] = {.label = "brightness"},
     [SETTERM_TUI_KEYBOARD] = {.label = "keyboard"},
+    [SETTERM_TUI_POWERKEY] = {.label = "powerkey"},
     [SETTERM_TUI_KEYRATE] = {.label = "keyrate"},
     [SETTERM_TUI_TIMEZONE] = {.label = "timezone"},
     [SETTERM_TUI_STARTUP] = {.label = "startup"},
@@ -89,33 +93,6 @@ static const setterm_tui_item_def_t setterm_tui_items[] = {
 static size_t setterm_tui_visible_width(size_t cols, size_t start_col)
 {
     return start_col < cols ? cols - start_col : 0;
-}
-
-static void setterm_tui_write_cell(size_t row,
-                                   size_t col,
-                                   size_t width,
-                                   const char *text,
-                                   uint8_t attr)
-{
-    char clipped[SETTERM_TUI_EDIT_MAX];
-    size_t len = 0;
-
-    if (width == 0) {
-        return;
-    }
-
-    solar_os_tui_fill(&setterm_tui.tui, row, col, 1, width, ' ', attr);
-
-    if (text == NULL || text[0] == '\0') {
-        return;
-    }
-
-    while (text[len] != '\0' && len + 1 < sizeof(clipped) && len < width) {
-        clipped[len] = text[len];
-        len++;
-    }
-    clipped[len] = '\0';
-    solar_os_tui_addstr(&setterm_tui.tui, row, col, clipped, attr);
 }
 
 static void setterm_tui_current_value(setterm_tui_item_t item, char *buffer, size_t buffer_len)
@@ -167,6 +144,14 @@ static void setterm_tui_current_value(setterm_tui_item_t item, char *buffer, siz
                 solar_os_input_keyboard_layout_name(solar_os_input_keyboard_layout()),
                 buffer_len);
         break;
+    case SETTERM_TUI_POWERKEY: {
+        solar_os_power_status_t status;
+        solar_os_power_get_status(&status);
+        strlcpy(buffer,
+                solar_os_power_key_action_name(status.key_action),
+                buffer_len);
+        break;
+    }
     case SETTERM_TUI_KEYRATE: {
         uint16_t rate = 0;
         uint16_t delay_ms = 0;
@@ -222,14 +207,14 @@ static void setterm_tui_render(void)
         split = cols > 2 ? cols / 2 : 1;
     }
 
-    setterm_tui_write_cell(0,
+    solar_os_tui_write_cell(&setterm_tui.tui, 0,
                            0,
                            split,
                            "parameter",
                            SOLAR_OS_TUI_ATTR_BOLD | SOLAR_OS_TUI_ATTR_INVERSE);
     if (cols > split) {
         solar_os_tui_vrule(tui, 0, split, rows, 1, SOLAR_OS_TUI_ATTR_NORMAL);
-        setterm_tui_write_cell(0,
+        solar_os_tui_write_cell(&setterm_tui.tui, 0,
                                split + 1,
                                setterm_tui_visible_width(cols, split + 1),
                                "value",
@@ -254,22 +239,21 @@ static void setterm_tui_render(void)
             value_attr = SOLAR_OS_TUI_ATTR_BOLD | SOLAR_OS_TUI_ATTR_INVERSE;
         }
 
-        setterm_tui_write_cell(i + 1,
+        solar_os_tui_write_cell(&setterm_tui.tui, i + 1,
                                0,
                                split,
                                setterm_tui_items[i].label,
                                label_attr);
         if (value_width > 0) {
-            setterm_tui_write_cell(i + 1, value_col, value_width, value, value_attr);
+            solar_os_tui_write_cell(&setterm_tui.tui, i + 1, value_col, value_width, value, value_attr);
         }
     }
 
-    if (setterm_tui.status[0] != '\0' && rows > 1) {
-        setterm_tui_write_cell(rows - 1,
-                               0,
-                               cols,
-                               setterm_tui.status,
-                               SOLAR_OS_TUI_ATTR_INVERSE);
+    if (rows > 1) {
+        solar_os_tui_draw_help(
+            &setterm_tui.tui,
+            setterm_tui.status[0] != '\0' ? setterm_tui.status :
+                "arrows select/change  enter edit  esc exits");
     }
 
     if (setterm_tui.editing && value_width > 0) {
@@ -319,6 +303,7 @@ static bool setterm_tui_cycle_selected(int direction)
     static const char * const palette_values[] = {"normal", "inverted"};
     static const char * const statusbar_values[] = {"show", "hide"};
     static const char * const brightness_values[] = {"0", "25", "50", "75", "100"};
+    static const char * const powerkey_values[] = {"sleep", "suspend"};
     static const char * const startup_values[] = {"flash", "sd"};
 #if SOLAR_OS_PACKAGE_SERVICE_BLE
     static const char * const keyboard_values[] = {"us", "de", "ru"};
@@ -355,6 +340,10 @@ static bool setterm_tui_cycle_selected(int direction)
                                        sizeof(keyboard_values) / sizeof(keyboard_values[0]),
                                        direction);
 #endif
+    case SETTERM_TUI_POWERKEY:
+        return setterm_tui_cycle_value(powerkey_values,
+                                       sizeof(powerkey_values) / sizeof(powerkey_values[0]),
+                                       direction);
     case SETTERM_TUI_STARTUP:
         return setterm_tui_cycle_value(
             startup_values,
@@ -476,6 +465,13 @@ static bool setterm_tui_apply_selected(void)
         return solar_os_input_parse_keyboard_layout(setterm_tui.edit_text, &layout) &&
             solar_os_input_set_keyboard_layout(layout) == ESP_OK;
     }
+    case SETTERM_TUI_POWERKEY: {
+        solar_os_power_key_action_t action;
+        return solar_os_power_parse_key_action(setterm_tui.edit_text, &action) &&
+            (action == SOLAR_OS_POWER_KEY_ACTION_SLEEP ||
+             action == SOLAR_OS_POWER_KEY_ACTION_SUSPEND) &&
+            solar_os_power_set_key_action(action) == ESP_OK;
+    }
     case SETTERM_TUI_KEYRATE:
         return setterm_tui_apply_keyrate();
     case SETTERM_TUI_TIMEZONE:
@@ -584,11 +580,10 @@ static esp_err_t setterm_tui_start(solar_os_context_t *ctx)
 {
     memset(&setterm_tui, 0, sizeof(setterm_tui));
     setterm_tui.ctx = ctx;
-    const esp_err_t err = solar_os_tui_begin(&setterm_tui.tui, ctx);
+    const esp_err_t err = solar_os_tui_screen_begin(&setterm_tui.tui, ctx);
     if (err != ESP_OK) {
         return err;
     }
-    (void)solar_os_tui_enable_diff(&setterm_tui.tui, true);
     solar_os_tui_set_cursor_visible(&setterm_tui.tui, false);
     setterm_tui_render();
     return ESP_OK;

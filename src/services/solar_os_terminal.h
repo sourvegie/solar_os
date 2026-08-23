@@ -30,10 +30,10 @@ typedef struct {
     bool battery_valid;
     uint8_t battery_percent;
     bool battery_external_power;
-    bool ble_connected;
-    bool ble_scanning;
     bool keyboard_layout_valid;
     uint8_t keyboard_layout;
+    uint8_t keyboard_count;
+    bool keyboard_scanning;
     bool wifi_started;
     bool wifi_connected;
     bool wifi_has_ip;
@@ -44,6 +44,8 @@ typedef struct {
     uint8_t hour;
     uint8_t minute;
     bool sd_mounted;
+    bool radio_attached;
+    bool link_running;
 } solar_os_status_bar_t;
 
 void solar_os_terminal_clear(solar_os_terminal_t *terminal);

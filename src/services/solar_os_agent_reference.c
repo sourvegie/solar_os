@@ -11,11 +11,15 @@
 
 static const char *const AGENT_REFERENCE_GUIDANCE =
     "Mandatory SolarOS coding rules: use only symbols and constants documented "
-    "in the returned matches. Never replace color, font, key, GPIO mode, or "
+    "in these focused, firmware-matched manual excerpts. Never replace color, "
+    "font, key, GPIO mode, or "
     "other constants with guessed strings or numbers. Never invent device, "
     "display, bus, or GPIO names. Treat optional modules as package-gated. "
-    "Follow begin/end and cleanup patterns even on errors. If a needed API is "
-    "not documented here, call solaros_reference again before writing code.";
+    "Follow begin/end and cleanup patterns even on errors. Python and Lua "
+    "service tables are mirrored; a counterpart-language excerpt preserves "
+    "the service contract, but calls must use the requested language's table, "
+    "nil/None, and error conventions. If a needed API is not documented here, "
+    "call solaros_reference again before writing code.";
 
 typedef struct {
     char *buffer;
@@ -44,18 +48,18 @@ static esp_err_t agent_reference_append(agent_reference_output_t *output,
     return ESP_OK;
 }
 
-static esp_err_t agent_reference_append_json_string(
+static esp_err_t agent_reference_append_json_string_n(
     agent_reference_output_t *output,
-    const char *text)
+    const char *text,
+    size_t text_len)
 {
     esp_err_t err = agent_reference_append(output, "\"");
-    for (const unsigned char *cursor = (const unsigned char *)text;
-         err == ESP_OK && cursor != NULL && *cursor != '\0';
-         cursor++) {
+    for (size_t offset = 0U; err == ESP_OK && offset < text_len; offset++) {
+        const unsigned char current = (const unsigned char)text[offset];
         char escaped[7];
         const char *value = escaped;
         size_t value_len = 0U;
-        switch (*cursor) {
+        switch (current) {
         case '"':
             value = "\\\"";
             value_len = 2U;
@@ -85,15 +89,15 @@ static esp_err_t agent_reference_append_json_string(
             value_len = 2U;
             break;
         default:
-            if (*cursor < 0x20U) {
+            if (current < 0x20U) {
                 const int written =
-                    snprintf(escaped, sizeof(escaped), "\\u%04x", *cursor);
+                    snprintf(escaped, sizeof(escaped), "\\u%04x", current);
                 if (written != 6) {
                     return ESP_FAIL;
                 }
                 value_len = 6U;
             } else {
-                escaped[0] = (char)*cursor;
+                escaped[0] = (char)current;
                 value_len = 1U;
             }
             break;
@@ -108,6 +112,15 @@ static esp_err_t agent_reference_append_json_string(
     return err == ESP_OK ? agent_reference_append(output, "\"") : err;
 }
 
+static esp_err_t agent_reference_append_json_string(
+    agent_reference_output_t *output,
+    const char *text)
+{
+    return text != NULL ?
+        agent_reference_append_json_string_n(output, text, strlen(text)) :
+        ESP_ERR_INVALID_ARG;
+}
+
 esp_err_t solar_os_agent_reference_search(const char *query,
                                           char *result,
                                           size_t result_len)
@@ -117,17 +130,28 @@ esp_err_t solar_os_agent_reference_search(const char *query,
         return ESP_ERR_INVALID_ARG;
     }
 
-    const solar_os_manual_page_t *matches[AGENT_REFERENCE_MATCH_MAX] = {0};
-    size_t count =
-        solar_os_manual_search(query, matches, AGENT_REFERENCE_MATCH_MAX);
-    if (count == 0U) {
-        const solar_os_manual_page_t *overview =
-            solar_os_manual_find("overview");
-        if (overview != NULL) {
-            matches[0] = overview;
-            count = 1U;
+    const solar_os_manual_reference_t
+        *references[AGENT_REFERENCE_MATCH_MAX] = {0};
+    const size_t reference_count =
+        solar_os_manual_reference_search(query,
+                                         references,
+                                         AGENT_REFERENCE_MATCH_MAX);
+    const solar_os_manual_page_t *pages[AGENT_REFERENCE_MATCH_MAX] = {0};
+    size_t page_count = 0U;
+    if (reference_count == 0U) {
+        page_count = solar_os_manual_search(query,
+                                            pages,
+                                            AGENT_REFERENCE_MATCH_MAX);
+        if (page_count == 0U) {
+            const solar_os_manual_page_t *overview =
+                solar_os_manual_find("overview");
+            if (overview != NULL) {
+                pages[0] = overview;
+                page_count = 1U;
+            }
         }
     }
+    const size_t count = reference_count > 0U ? reference_count : page_count;
 
     agent_reference_output_t output = {
         .buffer = result,
@@ -144,8 +168,44 @@ esp_err_t solar_os_agent_reference_search(const char *query,
                                      ",\"count\":%u,\"matches\":[",
                                      (unsigned)count);
     }
-    for (size_t i = 0U; err == ESP_OK && i < count; i++) {
-        const solar_os_manual_page_t *page = matches[i];
+    for (size_t i = 0U;
+         err == ESP_OK && i < reference_count;
+         i++) {
+        const solar_os_manual_reference_t *reference = references[i];
+        const char *text = NULL;
+        size_t text_len = 0U;
+        err = solar_os_manual_reference_text(reference, &text, &text_len);
+        if (err == ESP_OK) {
+            err = agent_reference_append(&output,
+                                         "%s{\"topic\":",
+                                         i == 0U ? "" : ",");
+        }
+        if (err == ESP_OK) {
+            err = agent_reference_append_json_string(&output, reference->topic);
+        }
+        if (err == ESP_OK) {
+            err = agent_reference_append(&output, ",\"section\":");
+        }
+        if (err == ESP_OK) {
+            err = agent_reference_append_json_string(&output,
+                                                     reference->section);
+        }
+        if (err == ESP_OK) {
+            err = agent_reference_append(&output,
+                                         ",\"part\":%u,\"parts\":%u,"
+                                         "\"reference\":",
+                                         (unsigned)reference->part,
+                                         (unsigned)reference->parts);
+        }
+        if (err == ESP_OK) {
+            err = agent_reference_append_json_string_n(&output, text, text_len);
+        }
+        if (err == ESP_OK) {
+            err = agent_reference_append(&output, "}");
+        }
+    }
+    for (size_t i = 0U; err == ESP_OK && i < page_count; i++) {
+        const solar_os_manual_page_t *page = pages[i];
         const char *reference = NULL;
         size_t reference_len = 0U;
         bool reference_owned = false;

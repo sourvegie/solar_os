@@ -2,6 +2,101 @@
 
 ## 4.x
 
+- **4.8.9** — 2026-08-22 — Python and Lua scripts can now capture bounded
+  signed 16-bit PCM blocks from the default audio input, including the native
+  sample rate and channel format; capture also works in generic builds with
+  runtime audio expansions. Installed Playground apps become direct shell
+  commands named by their app IDs, run from their installed manifests without
+  loading the catalog, and stay synchronized across installs, updates, and
+  removals. Added bounded asynchronous HTTP streams for Python and Lua, with
+  ordered response, header, data, completion, and error events suitable for
+  long-lived responses such as SSE. Script TUI input fields can mask UTF-8 text
+  while editing passwords and other secrets. The MeshCore EU868 radio profile
+  now uses the required 32-symbol preamble, restoring RFM95 reception with
+  compatible MeshCore nodes.
+- **4.8.8** — 2026-08-21 — Added selectable Espressif Long Range PHY modes to
+  the ESP-NOW Link transport. Use `phy=lr500` or `phy=lr250` on participating
+  devices to trade throughput for additional receive sensitivity and range;
+  `phy=normal` remains the default. `espnow status` reports the active PHY, and
+  stopping the job restores the previous Wi-Fi protocol selection. Added a
+  runtime SSD1683 expansion for the Waveshare 4.2-inch V2 400x300 monochrome
+  e-paper module, with automatic partial updates, unchanged-frame suppression,
+  and periodic full refreshes to limit ghosting. Custom SSD1683 boards can now
+  select `EPD_SSD1683_PANEL_WAVESHARE_V2` explicitly. Added the M5Stack Unit
+  CardKB as an I2C keyboard expansion at address `0x5f`; BLE, PS/2, and I2C
+  keyboards now share one input path, and the status icon reports multiple
+  connected keyboards. Boards without built-in SD hardware can attach an
+  SDSPI expansion and mount removable FAT storage at `/sdcard` while internal
+  flash remains `/`. `cat` now adds a trailing newline when necessary so the
+  shell prompt starts on a new line.
+- **4.8.7** — 2026-08-21 — Added a native ESP-IDF/lwIP WireGuard IPv4 client
+  with `wireguard import`, `up`, `down`, `status`, and `forget` commands. It
+  supports one peer, up to eight allowed-IP prefixes, split and full-tunnel
+  routing, optional tunnel DNS, Wi-Fi address-change reconnection, and
+  light-sleep recovery. Full tunnels default to fail-closed leak protection;
+  split tunnels default to fail-open, and either policy can be selected
+  explicitly. Profiles are validated without printing key material, temporary
+  secrets are wiped, handshake timestamps remain replay-safe without
+  synchronized wall time, and the encrypted endpoint remains bound to Wi-Fi.
+  The WireGuard worker is now created only while the tunnel is requested,
+  uses the PSRAM-aware task policy where safe, and releases its task memory and
+  active in-memory profile on `wireguard down`. BLE keyboard resume completes
+  before WireGuard restarts after light sleep. SSH display sessions again keep
+  independent local and remote text buffers; switching sessions restores the
+  correct scrollback, and closing SSH returns directly to the SolarOS prompt
+  without requiring an extra Enter. UART and USB CDC SSH sessions retain shared
+  port scrollback.
+- **4.8.6** — 2026-08-20 — Corrected italic and bold-italic font generation so
+  glyph overhangs no longer lose their top-right corners at any supported text
+  size. `Ctrl+V` now pastes the shared SolarOS clipboard into shell input without
+  executing pasted text. Chat now uses separate Channels and Chat tabs; selecting
+  a known gateway room joins it automatically before opening the conversation.
+  Notes keeps the selection on the next active item after completing one, has a
+  persistent help bar, can tidy all completed items, moves whole categories with
+  shifted arrows, and retains its cursor while adding or editing an item. Added
+  shared TUI screen layout, title, tab, help, UTF-8 input, cell, and list-navigation
+  helpers across native applications and configuration TUIs, with corresponding
+  high-level Python and Lua APIs. The display terminal now uses its final complete
+  text row and leaves any remaining vertical space below it.
+- **4.8.5** — 2026-08-20 — Added suspend mode: the primary display turns off,
+  the effective power profile becomes `lowpower`, and background jobs, radios,
+  Inbox handling, and audio continue. A second KEY short press resumes the
+  display and restores the selected profile. Added persistent
+  `setterm powerkey sleep|suspend` configuration and matching Setterm TUI,
+  commands, completion, and diagnostics. New or cleared configurations now
+  default to the `performance` profile, suspend as the KEY action, and Inbox
+  notification sound enabled on audio-capable boards. New terminals default to
+  the `compact` font and text size `16`; existing saved display preferences are
+  preserved.
+- **4.8.4** — 2026-08-20 — MicroPython embed generation is pinned and
+  reproducible, including the SolarOS qstr and port overrides. Python now uses
+  the port-compatible `EXTRA` language profile, with f-strings, sets,
+  properties, descriptors, additional built-ins, and the `array`, `cmath`,
+  `collections`, `errno`, `math`, and `struct` modules. Added mirrored,
+  cancellation-aware `solaros.http` Python and Lua bindings for bounded HTTP
+  GET, POST, PUT, PATCH, DELETE, HEAD, redirects, headers, and binary bodies.
+  Added the selected `json`, `binascii`, `hashlib`, and `random` standard
+  modules, including SHA-256 and hardware-seeded non-cryptographic randomness.
+  Added SolarOS-backed `open()` text and binary streams plus external `.py`,
+  `.mpy`, and package imports rooted at the script directory or preferred
+  storage. Added mirrored, synchronous managed TCP, UDP, WebSocket, and secure
+  WebSocket clients with interpreter-owned handles, bounded blocking,
+  cancellation checkpoints, automatic teardown, and explicit per-runtime,
+  global, timeout, and transfer limits. Python and Lua service modules now
+  expand from one package-gated registration descriptor, including aliases,
+  constants, and nested HID tables, so their public APIs cannot drift as typed
+  bindings are extended. Native Agent scripting lookups now search bounded,
+  task-specific sections of the complete firmware-matched Python and Lua
+  manuals, with generated zero-copy indexes and retrieval coverage for every
+  shared service. MicroPython now initializes the `EXTRA` profile's C-stack
+  limit from the current FreeRTOS task, restoring REPL and Agent script
+  execution while preserving recursion-depth protection. Native signed and
+  unsigned 64-bit values that fit MicroPython's immediate integer range now
+  convert without requiring long-integer support, restoring `solaros.http`
+  response dictionaries, `solaros.uptime_ms()`, and small DSP dot products.
+  Board capability output now uses one checked capacity and includes the full
+  Waveshare sensor list. Enter no longer key-repeats, preventing a short Python
+  app from submitting an empty command after it returns to the shell prompt.
 - **4.8.3** — 2026-08-12 — Gateway Chat now uses the global SolarOS user and
   hostname identity instead of a separate saved username. Added CRC-verified
   NVS backup and restore to disk with `/.solar/nvs.bin` as the default file.

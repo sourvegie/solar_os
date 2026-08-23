@@ -51,6 +51,7 @@ struct solar_os_terminal {
     bool palette_inverted;
     uint8_t char_width;
     uint8_t line_height;
+    uint8_t cell_ascent;
     uint8_t baseline_offset;
     uint8_t status_bar_height;
     bool status_bar_visible;

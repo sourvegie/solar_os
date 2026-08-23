@@ -9,6 +9,8 @@
 typedef uint64_t solar_os_board_capabilities_t;
 typedef uint64_t solar_os_board_capability_t;
 
+#define SOLAR_OS_BOARD_CAPABILITIES_TEXT_MAX 384U
+
 #define SOLAR_OS_BOARD_CAP_DISPLAY (1ULL << 0)
 #define SOLAR_OS_BOARD_CAP_GFX (1ULL << 1)
 #define SOLAR_OS_BOARD_CAP_CDC (1ULL << 2)
@@ -149,4 +151,4 @@ typedef uint64_t solar_os_board_capability_t;
 solar_os_board_capabilities_t solar_os_board_capabilities(void);
 bool solar_os_board_has(solar_os_board_capability_t capability);
 const char *solar_os_board_capability_name(solar_os_board_capability_t capability);
-void solar_os_board_capabilities_format(char *buffer, size_t buffer_len);
+bool solar_os_board_capabilities_format(char *buffer, size_t buffer_len);

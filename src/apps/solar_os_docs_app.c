@@ -19,6 +19,7 @@
 #include "solar_os_shell_io.h"
 #include "solar_os_terminal.h"
 #include "solar_os_tui.h"
+#include "solar_os_tui_widgets.h"
 
 #define DOCS_APP_LINE_MAX (SOLAR_OS_TERMINAL_MAX_COLS * 4U + 1U)
 #define DOCS_APP_MAX_FOLDABLE_SECTIONS 64U
@@ -50,40 +51,6 @@ typedef struct {
 
 static void *docs_app_state;
 #define docs_app (*(docs_app_state_t *)docs_app_state)
-
-static void docs_app_write_cell(size_t row,
-                                size_t col,
-                                size_t width,
-                                const char *text,
-                                uint8_t attr)
-{
-    const size_t rows = solar_os_tui_rows(&docs_app.tui);
-    const size_t cols = solar_os_tui_cols(&docs_app.tui);
-    char clipped[DOCS_APP_LINE_MAX];
-
-    if (row >= rows || col >= cols || width == 0U) {
-        return;
-    }
-    if (col + width > cols) {
-        width = cols - col;
-    }
-    solar_os_tui_fill(&docs_app.tui, row, col, 1U, width, ' ', attr);
-
-    size_t copy = text != NULL ? strlen(text) : 0U;
-    if (copy > width) {
-        copy = width;
-    }
-    if (copy > sizeof(clipped) - 1U) {
-        copy = sizeof(clipped) - 1U;
-    }
-    if (copy > 0U) {
-        memcpy(clipped, text, copy);
-    }
-    clipped[copy] = '\0';
-    if (copy > 0U) {
-        solar_os_tui_addstr(&docs_app.tui, row, col, clipped, attr);
-    }
-}
 
 static size_t docs_app_visible_rows(void)
 {
@@ -292,24 +259,16 @@ static void docs_app_render(void)
     solar_os_tui_set_cursor_visible(&docs_app.tui, false);
     solar_os_tui_clear(&docs_app.tui);
     docs_app_header(line, sizeof(line));
-    docs_app_write_cell(0U,
-                        0U,
-                        cols,
-                        line,
-                        SOLAR_OS_TUI_ATTR_INVERSE | SOLAR_OS_TUI_ATTR_BOLD);
+    solar_os_tui_draw_title(&docs_app.tui, line, NULL);
 
     if (rows < 3U || cols < 12U) {
-        docs_app_write_cell(1U,
-                            0U,
-                            cols,
-                            "terminal too small",
-                            SOLAR_OS_TUI_ATTR_NORMAL);
+        solar_os_tui_draw_too_small(&docs_app.tui, "docs");
     } else {
         for (size_t row = 0U; row < visible; row++) {
             const size_t visible_index = docs_app.top + row;
             docs_node_t node;
             if (!docs_node_at(visible_index, &node)) {
-                docs_app_write_cell(row + 1U,
+                solar_os_tui_write_cell(&docs_app.tui, row + 1U,
                                     0U,
                                     cols,
                                     "",
@@ -340,16 +299,13 @@ static void docs_app_render(void)
                 (node.kind == DOCS_NODE_SECTION ?
                     SOLAR_OS_TUI_ATTR_BOLD :
                     SOLAR_OS_TUI_ATTR_NORMAL);
-            docs_app_write_cell(row + 1U, 0U, cols, line, attr);
+            solar_os_tui_write_cell(&docs_app.tui, row + 1U, 0U, cols, line, attr);
         }
     }
 
     if (rows > 0U) {
-        docs_app_write_cell(rows - 1U,
-                            0U,
-                            cols,
-                            "Enter open/fold  Left/Right tree  q quit",
-                            SOLAR_OS_TUI_ATTR_INVERSE);
+        solar_os_tui_draw_help(&docs_app.tui,
+                               "Enter open/fold  Left/Right tree  q quit");
     }
     solar_os_tui_refresh(&docs_app.tui);
 }
@@ -441,11 +397,10 @@ static void docs_toggle_section(const docs_node_t *node, bool expand)
 static esp_err_t docs_app_start(solar_os_context_t *ctx)
 {
     memset(&docs_app, 0, sizeof(docs_app));
-    const esp_err_t err = solar_os_tui_begin(&docs_app.tui, ctx);
+    const esp_err_t err = solar_os_tui_screen_begin(&docs_app.tui, ctx);
     if (err != ESP_OK) {
         return err;
     }
-    (void)solar_os_tui_enable_diff(&docs_app.tui, true);
 
     docs_app.collapsed_sections = UINT64_MAX;
 

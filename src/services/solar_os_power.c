@@ -21,8 +21,9 @@
 static const char *TAG = "solar_os_power";
 
 static solar_os_power_status_t power_status = {
-    .profile = SOLAR_OS_POWER_PROFILE_BALANCED,
-    .key_action = SOLAR_OS_POWER_KEY_ACTION_LIGHT,
+    .profile = SOLAR_OS_POWER_PROFILE_PERFORMANCE,
+    .effective_profile = SOLAR_OS_POWER_PROFILE_PERFORMANCE,
+    .key_action = SOLAR_OS_POWER_KEY_ACTION_SUSPEND,
 };
 static uint32_t sleep_enter_ms;
 static uint32_t automatic_light_sleep_holdoff_until_ms;
@@ -129,7 +130,7 @@ static bool profile_valid(solar_os_power_profile_t profile)
 static bool key_action_valid(solar_os_power_key_action_t action)
 {
     return action >= SOLAR_OS_POWER_KEY_ACTION_OFF &&
-        action <= SOLAR_OS_POWER_KEY_ACTION_LIGHT;
+        action <= SOLAR_OS_POWER_KEY_ACTION_SUSPEND;
 }
 
 static esp_err_t apply_bt_sleep_policy(bool automatic_light_sleep)
@@ -164,7 +165,12 @@ esp_err_t solar_os_power_apply_runtime_policy(void)
     uint32_t min_mhz = 0;
     uint32_t max_mhz = 0;
     bool profile_automatic_light_sleep = false;
-    profile_pm_config(power_status.profile, &min_mhz, &max_mhz, &profile_automatic_light_sleep);
+    power_status.effective_profile = power_status.suspend_active ?
+        SOLAR_OS_POWER_PROFILE_LOWPOWER : power_status.profile;
+    profile_pm_config(power_status.effective_profile,
+                      &min_mhz,
+                      &max_mhz,
+                      &profile_automatic_light_sleep);
     update_automatic_light_sleep_holdoff_status(power_millis());
 
     power_status.cpu_min_mhz = min_mhz;
@@ -208,7 +214,7 @@ esp_err_t solar_os_power_apply_runtime_policy(void)
     (void)apply_bt_sleep_policy(power_status.automatic_light_sleep);
     SOLAR_OS_LOGI(TAG,
                   "PM profile=%s max=%u min=%u auto-light=%s",
-                  solar_os_power_profile_name(power_status.profile),
+                  solar_os_power_profile_name(power_status.effective_profile),
                   (unsigned)max_mhz,
                   (unsigned)min_mhz,
                   power_status.automatic_light_sleep ? "on" :
@@ -227,6 +233,31 @@ esp_err_t solar_os_power_begin_explicit_sleep(void)
 esp_err_t solar_os_power_end_explicit_sleep(void)
 {
     power_status.explicit_sleep_active = false;
+    return solar_os_power_apply_runtime_policy();
+}
+
+esp_err_t solar_os_power_begin_suspend(void)
+{
+    if (power_status.suspend_active) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    power_status.suspend_active = true;
+    const esp_err_t ret = solar_os_power_apply_runtime_policy();
+    if (ret != ESP_OK) {
+        power_status.suspend_active = false;
+        (void)solar_os_power_apply_runtime_policy();
+    }
+    return ret;
+}
+
+esp_err_t solar_os_power_end_suspend(void)
+{
+    if (!power_status.suspend_active) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    power_status.suspend_active = false;
     return solar_os_power_apply_runtime_policy();
 }
 
@@ -280,8 +311,9 @@ esp_err_t solar_os_power_init(void)
         return ESP_OK;
     }
 
-    power_status.profile = SOLAR_OS_POWER_PROFILE_BALANCED;
-    power_status.key_action = SOLAR_OS_POWER_KEY_ACTION_LIGHT;
+    power_status.profile = SOLAR_OS_POWER_PROFILE_PERFORMANCE;
+    power_status.effective_profile = SOLAR_OS_POWER_PROFILE_PERFORMANCE;
+    power_status.key_action = SOLAR_OS_POWER_KEY_ACTION_SUSPEND;
     power_status.idle_sleep_ms = profile_default_idle_ms(power_status.profile);
     power_status.initialized = true;
 
@@ -379,6 +411,7 @@ void solar_os_power_note_activity(uint32_t now_ms)
 bool solar_os_power_should_idle_sleep(uint32_t now_ms)
 {
     if (!power_status.initialized ||
+        power_status.suspend_active ||
         power_status.idle_sleep_ms == 0 ||
         power_status.last_activity_ms == 0) {
         return false;
@@ -453,8 +486,10 @@ const char *solar_os_power_key_action_name(solar_os_power_key_action_t action)
     switch (action) {
     case SOLAR_OS_POWER_KEY_ACTION_OFF:
         return "off";
-    case SOLAR_OS_POWER_KEY_ACTION_LIGHT:
-        return "light";
+    case SOLAR_OS_POWER_KEY_ACTION_SLEEP:
+        return "sleep";
+    case SOLAR_OS_POWER_KEY_ACTION_SUSPEND:
+        return "suspend";
     default:
         return "unknown";
     }
@@ -464,11 +499,20 @@ bool solar_os_power_parse_key_action(const char *name, solar_os_power_key_action
 {
     static const solar_os_power_key_action_t actions[] = {
         SOLAR_OS_POWER_KEY_ACTION_OFF,
-        SOLAR_OS_POWER_KEY_ACTION_LIGHT,
+        SOLAR_OS_POWER_KEY_ACTION_SLEEP,
+        SOLAR_OS_POWER_KEY_ACTION_SUSPEND,
     };
 
     if (name == NULL) {
         return false;
+    }
+
+    /* Preserve the pre-4.8.5 command spelling for startup scripts. */
+    if (strcmp(name, "light") == 0) {
+        if (action != NULL) {
+            *action = SOLAR_OS_POWER_KEY_ACTION_SLEEP;
+        }
+        return true;
     }
 
     for (size_t i = 0; i < sizeof(actions) / sizeof(actions[0]); i++) {

@@ -509,7 +509,8 @@ ESP32-WROVER-E-N4R8 module, 4 MB flash, 8 MB physical PSRAM, a CH340 USB-to-UART
 bridge, and the rear microSD slot. It uses `uart0` on GPIO1/GPIO3 as the boot
 shell and one-bit SDMMC on GPIO14 clock, GPIO15 command, and GPIO2 data.
 The active-low BOOT button on GPIO0 is also the SolarOS KEY. A short press uses
-the configured KEY power action; a long press forgets the remembered BLE
+the configured sleep or suspend action; another short press resumes from
+suspend. A long press forgets the remembered BLE
 keyboard and starts pairing. Do not hold the button during reset or power-up,
 because GPIO0 low selects the ESP32 serial download boot mode.
 
@@ -651,7 +652,7 @@ degrees clockwise from the controller's portrait orientation. The onboard
 controls are mapped as follows:
 
 - GPIO1: EXIT, mapped to the foreground app-exit key.
-- GPIO2: MENU, used as the SolarOS KEY for sleep/wake and BLE pairing.
+- GPIO2: MENU, used as the SolarOS KEY for sleep/suspend control and BLE pairing.
 - GPIO6: rotary counter-clockwise/previous, mapped to Down.
 - GPIO4: rotary clockwise/next, mapped to Up.
 - GPIO5: rotary press, mapped to Enter.
@@ -710,7 +711,7 @@ GPIO8 SDA and GPIO9 SCL. The default SPI bus is FSPI on GPIO12 SCK, GPIO13
 MISO, and GPIO11 MOSI, with chip-select slots on GPIO4, GPIO10, GPIO5, GPIO6,
 and GPIO7.
 Its active-low BOOT button on GPIO0 is also the SolarOS KEY for the configured
-short-press power action, light-sleep wake, and long-press BLE keyboard
+short-press sleep/suspend action, light-sleep wake, and long-press BLE keyboard
 replacement. GPIO0 remains reserved from runtime routing. Do not hold the
 button during reset or power-up, because that selects download boot mode.
 The N16R8 target uses `partitions_16mb_devkit.csv`: each OTA application slot
@@ -824,6 +825,7 @@ host:
 
 ```c
 #define SOLAR_OS_BOARD_DISPLAY_CONTROLLER "SSD1683"
+#define SOLAR_OS_BOARD_DISPLAY_SSD1683_PANEL_VARIANT EPD_SSD1683_PANEL_UNKNOWN
 #define SOLAR_OS_BOARD_DISPLAY_WIDTH 400
 #define SOLAR_OS_BOARD_DISPLAY_HEIGHT 300
 
@@ -835,6 +837,14 @@ host:
 #define SOLAR_OS_BOARD_PIN_LCD_BUSY GPIO_NUM_48
 #define SOLAR_OS_BOARD_PIN_LCD_POWER GPIO_NUM_7
 ```
+
+Every board that selects `drivers/display_ssd1683.cmake` must define
+`SOLAR_OS_BOARD_DISPLAY_SSD1683_PANEL_VARIANT`. Use
+`EPD_SSD1683_PANEL_UNKNOWN` only when the board can contain either supported
+Elecrow panel revision and needs BUSY-based detection. A board built around the
+Waveshare 4.2-inch V2 module must select
+`EPD_SSD1683_PANEL_WAVESHARE_V2` explicitly. The other fixed values are
+`EPD_SSD1683_PANEL_LEGACY` and `EPD_SSD1683_PANEL_GREEN_STICKER`.
 
 Its `refresh=auto` default performs fast updates, skips unchanged frames, and
 inserts a full waveform on the first update and after every 19 fast updates to

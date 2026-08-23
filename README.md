@@ -50,6 +50,37 @@ and target reference.
 - [OTA release schema](doc/solar_os_ota_schema.md)
 - [Manual generation and signed refresh](doc/manual-system.md)
 
+## Contributing
+
+SolarOS follows the principle **"Everything you need. Nothing you don't."**
+Changes to the upstream firmware must elevate the supported hardware and provide
+clear value to SolarOS users in general. A feature existing in a personal fork
+does not by itself make that feature a candidate for the upstream firmware.
+
+- **Applications:** User and community applications should normally be written
+  in Python or Lua and distributed through the
+  [SolarOS Playground](https://github.com/nilseuropa/solar_os_playground). The
+  scripting bindings exist so applications can use native SolarOS services
+  without becoming part of the firmware. A native application is accepted only
+  at the maintainer's discretion when it benefits the wider SolarOS community
+  and complies with SolarOS architecture, resource, package, interface,
+  documentation, and testing policies.
+- **Board support:** Support for additional boards is welcome. The contributor
+  is responsible for validating and maintaining support for boards outside the
+  maintainer's primary hardware targets. Pull requests must include build
+  results and hardware-in-the-loop test evidence from the actual board; a
+  successful compile alone is not hardware validation.
+- **Expansion drivers:** Support for additional expansion hardware is welcome
+  under the same conditions. The driver must use the SolarOS driver, service,
+  resource, capability, and package boundaries, and the contributor is
+  responsible for hardware-in-the-loop testing and ongoing regression
+  validation on the actual device.
+
+Keep each pull request focused on one feature and base it on the current
+upstream branch. Acceptance is decided case by case; contributors should discuss
+large native applications, new boards, and expansion drivers before investing
+in a substantial implementation.
+
 ## Architecture
 
 ![Architecture diagram](doc/solar_os_architecture.png)

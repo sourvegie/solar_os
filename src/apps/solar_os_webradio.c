@@ -30,6 +30,7 @@
 #include "solar_os_stream.h"
 #include "solar_os_task.h"
 #include "solar_os_tui.h"
+#include "solar_os_tui_widgets.h"
 #include "solar_os_webradio_catalog.h"
 
 #define WEBRADIO_TASK_STACK 20480U
@@ -376,6 +377,8 @@ static void webradio_render_tui(void)
     const size_t rows = solar_os_tui_rows(&webradio.tui);
     const size_t cols = solar_os_tui_cols(&webradio.tui);
     if (rows < 5U || cols < 20U) {
+        solar_os_tui_draw_too_small(&webradio.tui, "webradio");
+        solar_os_tui_refresh(&webradio.tui);
         return;
     }
 
@@ -394,18 +397,7 @@ static void webradio_render_tui(void)
                              NULL);
 
     solar_os_tui_clear(&webradio.tui);
-    solar_os_tui_fill(&webradio.tui,
-                      0U,
-                      0U,
-                      1U,
-                      cols,
-                      ' ',
-                      SOLAR_OS_TUI_ATTR_INVERSE | SOLAR_OS_TUI_ATTR_BOLD);
-    solar_os_tui_addstr(&webradio.tui,
-                        0U,
-                        1U,
-                        "WebRadio",
-                        SOLAR_OS_TUI_ATTR_INVERSE | SOLAR_OS_TUI_ATTR_BOLD);
+    solar_os_tui_draw_title(&webradio.tui, "WebRadio", NULL);
 
     char status[192];
     if (state == WEBRADIO_PLAYBACK_PLAYING) {
@@ -537,15 +529,7 @@ static void webradio_render_tui(void)
     const char *controls = editing ?
         "Enter next/save  Esc cancel" :
         "Up/Down select  +/- volume  A add  E edit  Del remove  Enter play  Space stop";
-    webradio_clip(clipped,
-                  sizeof(clipped),
-                  controls,
-                  cols > 2U ? cols - 2U : 0U);
-    solar_os_tui_addstr(&webradio.tui,
-                        rows - 1U,
-                        1U,
-                        clipped,
-                        SOLAR_OS_TUI_ATTR_BOLD);
+    solar_os_tui_draw_help(&webradio.tui, controls);
     solar_os_tui_refresh(&webradio.tui);
 }
 
@@ -1710,11 +1694,10 @@ static esp_err_t webradio_start(solar_os_context_t *ctx)
     webradio.tab = WEBRADIO_TAB_PLAYER;
     webradio.visualizer = WEBRADIO_VISUALIZER_SCOPE;
     if (webradio.mode == WEBRADIO_MODE_TUI) {
-        err = solar_os_tui_begin(&webradio.tui, ctx);
+        err = solar_os_tui_screen_begin(&webradio.tui, ctx);
         if (err != ESP_OK) {
             return err;
         }
-        (void)solar_os_tui_enable_diff(&webradio.tui, true);
     } else {
         err = solar_os_oscilloscope_widget_create(
             WEBRADIO_SCOPE_SAMPLES, &webradio.scope);

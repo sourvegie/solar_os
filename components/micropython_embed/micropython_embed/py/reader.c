@@ -149,7 +149,11 @@ void mp_reader_new_file_from_fd(mp_reader_t *reader, int fd, bool close_fd) {
 // If MICROPY_VFS_POSIX is defined then this function is provided by the VFS layer
 void mp_reader_new_file(mp_reader_t *reader, qstr filename) {
     MP_THREAD_GIL_EXIT();
-    int fd = open(qstr_str(filename), O_RDONLY, 0644);
+    char resolved[SOLAR_OS_MICROPYTHON_PATH_MAX];
+    if (solar_os_micropython_resolve_path(qstr_str(filename), resolved, sizeof(resolved)) != 0) {
+        mp_raise_OSError_with_filename(errno, qstr_str(filename));
+    }
+    int fd = open(resolved, O_RDONLY, 0644);
     MP_THREAD_GIL_ENTER();
     if (fd < 0) {
         mp_raise_OSError_with_filename(errno, qstr_str(filename));

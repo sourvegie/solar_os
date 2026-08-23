@@ -445,6 +445,25 @@ static bool manual_contains_ci(const char *text, const char *needle)
     return false;
 }
 
+static bool manual_contains_ci_n(const char *text,
+                                 size_t text_len,
+                                 const char *needle)
+{
+    if (text == NULL || needle == NULL || needle[0] == '\0') {
+        return false;
+    }
+    const size_t needle_len = strlen(needle);
+    if (needle_len > text_len) {
+        return false;
+    }
+    for (size_t offset = 0U; offset + needle_len <= text_len; offset++) {
+        if (strncasecmp(text + offset, needle, needle_len) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool manual_stop_word(const char *token)
 {
     static const char *const words[] = {
@@ -546,6 +565,190 @@ size_t solar_os_manual_search(const char *query,
             scores[move] = scores[move - 1U];
         }
         results[insert] = page;
+        scores[insert] = score;
+    }
+    return count;
+}
+
+size_t solar_os_manual_reference_count(void)
+{
+    return SOLAR_OS_MANUAL_GENERATED_REFERENCE_COUNT;
+}
+
+const solar_os_manual_reference_t *solar_os_manual_reference_get(size_t index)
+{
+    if (index >= solar_os_manual_reference_count()) {
+        return NULL;
+    }
+    return &SOLAR_OS_MANUAL_GENERATED_REFERENCES[index + 1U];
+}
+
+esp_err_t solar_os_manual_reference_text(
+    const solar_os_manual_reference_t *reference,
+    const char **text,
+    size_t *text_len)
+{
+    if (reference == NULL || text == NULL || text_len == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const solar_os_manual_page_t *page = solar_os_manual_find(reference->page_id);
+    if (page == NULL || page->body == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    const size_t body_len = strlen(page->body);
+    if ((size_t)reference->offset > body_len ||
+        (size_t)reference->length > body_len - (size_t)reference->offset) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    *text = page->body + reference->offset;
+    *text_len = reference->length;
+    return ESP_OK;
+}
+
+static bool manual_reference_qualifier(const char *token)
+{
+    static const char *const qualifiers[] = {
+        "api", "lua", "micropython", "python", "script", "scripting", "solaros",
+    };
+    for (size_t i = 0U; i < sizeof(qualifiers) / sizeof(qualifiers[0]); i++) {
+        if (strcmp(token, qualifiers[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool manual_reference_language_matches(
+    const solar_os_manual_reference_t *reference,
+    const char *token)
+{
+    if (strcmp(token, "python") == 0 || strcmp(token, "micropython") == 0) {
+        return strcmp(reference->page_id, "python") == 0;
+    }
+    if (strcmp(token, "lua") == 0) {
+        return strcmp(reference->page_id, "lua") == 0;
+    }
+    return false;
+}
+
+static unsigned manual_reference_score(
+    const solar_os_manual_reference_t *reference,
+    const char *query)
+{
+    const char *text = NULL;
+    size_t text_len = 0U;
+    if (reference == NULL || query == NULL || query[0] == '\0' ||
+        solar_os_manual_reference_text(reference, &text, &text_len) != ESP_OK) {
+        return 0U;
+    }
+
+    unsigned score = 0U;
+    unsigned task_tokens = 0U;
+    unsigned task_matches = 0U;
+    unsigned structural_matches = 0U;
+    bool language_qualified = false;
+    char token[MANUAL_TOKEN_MAX + 1U];
+    size_t token_len = 0U;
+    for (const unsigned char *cursor = (const unsigned char *)query;; cursor++) {
+        const bool separator = *cursor == '\0' || !isalnum(*cursor);
+        if (!separator && token_len < MANUAL_TOKEN_MAX) {
+            token[token_len++] = (char)tolower(*cursor);
+        }
+        if (separator && token_len > 0U) {
+            token[token_len] = '\0';
+            if (!manual_stop_word(token)) {
+                if (manual_reference_qualifier(token)) {
+                    if (manual_reference_language_matches(reference, token)) {
+                        score += 1000U;
+                        language_qualified = true;
+                    }
+                } else {
+                    task_tokens++;
+                    bool matched = false;
+                    if (manual_contains_ci(reference->topic, token)) {
+                        score += 600U;
+                        matched = true;
+                        structural_matches++;
+                    }
+                    if (manual_contains_ci(reference->section, token)) {
+                        score += 400U;
+                        matched = true;
+                        structural_matches++;
+                    }
+                    if (manual_contains_ci_n(text, text_len, token)) {
+                        score += 30U;
+                        matched = true;
+                    }
+                    if (matched) {
+                        task_matches++;
+                    }
+                }
+            }
+            token_len = 0U;
+        }
+        if (*cursor == '\0') {
+            break;
+        }
+    }
+    if (task_tokens > 0U && task_matches == 0U) {
+        return 0U;
+    }
+    if (task_tokens > 0U && structural_matches == 0U &&
+        task_matches * 2U < task_tokens) {
+        return 0U;
+    }
+    if (task_tokens == 0U && !language_qualified) {
+        return 0U;
+    }
+    if (reference->part == 1U && structural_matches > 0U) {
+        score += 100U;
+    }
+    return score;
+}
+
+size_t solar_os_manual_reference_search(
+    const char *query,
+    const solar_os_manual_reference_t **results,
+    size_t capacity)
+{
+    if (query == NULL || query[0] == '\0' || results == NULL || capacity == 0U) {
+        return 0U;
+    }
+    if (capacity > MANUAL_SEARCH_MAX) {
+        capacity = MANUAL_SEARCH_MAX;
+    }
+
+    unsigned scores[MANUAL_SEARCH_MAX] = {0};
+    size_t count = 0U;
+    for (size_t candidate = 0U;
+         candidate < solar_os_manual_reference_count();
+         candidate++) {
+        const solar_os_manual_reference_t *reference =
+            solar_os_manual_reference_get(candidate);
+        const unsigned score = manual_reference_score(reference, query);
+        if (score == 0U) {
+            continue;
+        }
+        size_t insert = 0U;
+        while (insert < count &&
+               (scores[insert] > score ||
+                (scores[insert] == score &&
+                 (strcmp(results[insert]->topic, reference->topic) < 0 ||
+                  (strcmp(results[insert]->topic, reference->topic) == 0 &&
+                   results[insert]->part < reference->part))))) {
+            insert++;
+        }
+        if (insert >= capacity) {
+            continue;
+        }
+        if (count < capacity) {
+            count++;
+        }
+        for (size_t move = count - 1U; move > insert; move--) {
+            results[move] = results[move - 1U];
+            scores[move] = scores[move - 1U];
+        }
+        results[insert] = reference;
         scores[insert] = score;
     }
     return count;

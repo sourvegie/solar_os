@@ -4,6 +4,7 @@
 #include "solar_os_shell_common.h"
 #include "solar_os_shell_io.h"
 #include "solar_os_shell_launch.h"
+#include "solar_os_shell_line.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -28,6 +29,7 @@
 #include "solar_os_agent.h"
 #endif
 #include "solar_os_board_caps.h"
+#include "solar_os_clipboard.h"
 #if SOLAR_OS_PACKAGE_SERVICE_RESOURCES
 #include "solar_os_buses.h"
 #endif
@@ -91,6 +93,7 @@
 #define SHELL_HISTORY_FILE "history"
 #define SHELL_STARTUP_FILE "startup"
 #define SHELL_ALIAS_FILE "alias"
+#define SHELL_PLAYGROUND_ALIAS_FILE "playground"
 #define SHELL_NVS_NAMESPACE "shell"
 #define SHELL_NVS_STARTUP_SOURCE_KEY "startup_src"
 #define SHELL_SCRIPT_MAX_DEPTH 3
@@ -365,6 +368,7 @@ static const shell_command_t shell_builtin_commands[] = {
     {"display", "list display targets", solar_os_shell_cmd_display},
     {"clear", "clear the screen", solar_os_shell_cmd_clear},
     {"sleep", "enter light sleep", solar_os_shell_cmd_sleep},
+    {"suspend", "keep services running with the display off", solar_os_shell_cmd_suspend},
     {"power", "power profile and sleep policy", solar_os_shell_cmd_power},
     {"watch", "repeat a command", cmd_watch},
     {"setterm", "configure terminal settings", solar_os_shell_cmd_setterm},
@@ -426,6 +430,9 @@ static const shell_command_t shell_builtin_commands[] = {
 #endif
 #if SOLAR_OS_PACKAGE_SERVICE_WIFI
     {"wifi", "Wi-Fi station control", solar_os_shell_cmd_wifi},
+#endif
+#if SOLAR_OS_PACKAGE_SERVICE_WIREGUARD
+    {"wireguard", "WireGuard VPN client", solar_os_shell_cmd_wireguard},
 #endif
 #if SOLAR_OS_PACKAGE_SERVICE_ESPNOW
     {"espnow", "ESP-NOW transport and peers", solar_os_shell_cmd_espnow},
@@ -540,6 +547,8 @@ static const char * const setterm_subcommands[] = {
     "charset",
     "keyboard",
     "keymap",
+    "powerkey",
+    "key",
     "keyrate",
     "typerate",
     "repeat",
@@ -558,6 +567,7 @@ static const char * const setterm_brightness_values[] = {"0", "25", "50", "75", 
 static const char * const setterm_profile_values[] = {"vt100", "ansi", "dumb"};
 static const char * const setterm_charset_values[] = {"utf8", "ascii"};
 static const char * const setterm_keyboard_values[] = {"us", "de", "ru"};
+static const char * const setterm_powerkey_values[] = {"sleep", "suspend"};
 static const char * const setterm_keyrate_values[] = {"off"};
 static const char * const setterm_timezone_values[] = {"UTC", "Europe/Berlin"};
 static const char * const setterm_startup_values[] = {"flash", "sd"};
@@ -620,6 +630,21 @@ static const char * const wifi_subcommands[] = {
     "forget",
     "nat",
 };
+
+#if SOLAR_OS_PACKAGE_SERVICE_WIREGUARD
+static const char * const wireguard_subcommands[] = {
+    "status",
+    "import",
+    "forget",
+    "up",
+    "down",
+};
+
+static const char * const wireguard_policy_values[] = {
+    "fail-open",
+    "fail-closed",
+};
+#endif
 
 static const char * const wifi_ap_subcommands[] = {"status", "on", "off"};
 static const char * const wifi_nat_subcommands[] = {"status", "on", "off"};
@@ -870,6 +895,9 @@ static const char * const espnow_link_option_values[] = {
     "channel=11",
     "channel=12",
     "channel=13",
+    "phy=normal",
+    "phy=lr500",
+    "phy=lr250",
     "inbox=off",
     "inbox=on",
     "chat=off",
@@ -1136,6 +1164,7 @@ static const char * const power_subcommands[] = {
     "idle",
     "key",
     "sleep",
+    "suspend",
 };
 
 static const char * const power_profile_values[] = {
@@ -1145,7 +1174,7 @@ static const char * const power_profile_values[] = {
     "lowpower",
 };
 static const char * const power_idle_values[] = {"off"};
-static const char * const power_key_values[] = {"off", "light"};
+static const char * const power_key_values[] = {"off", "sleep", "suspend"};
 
 static const char * const battery_subcommands[] = {
     "status",
@@ -1438,6 +1467,8 @@ static const char * const path_setterm_profile[] = {"setterm", "profile"};
 static const char * const path_setterm_charset[] = {"setterm", "charset"};
 static const char * const path_setterm_keyboard[] = {"setterm", "keyboard"};
 static const char * const path_setterm_keymap[] = {"setterm", "keymap"};
+static const char * const path_setterm_powerkey[] = {"setterm", "powerkey"};
+static const char * const path_setterm_key[] = {"setterm", "key"};
 static const char * const path_setterm_keyrate[] = {"setterm", "keyrate"};
 static const char * const path_setterm_typerate[] = {"setterm", "typerate"};
 static const char * const path_setterm_repeat[] = {"setterm", "repeat"};
@@ -1642,6 +1673,11 @@ static const char * const path_job_start_espnow_link_option3[] = {
     "job", "start", "espnow-link", SHELL_COMPLETION_ANY,
     SHELL_COMPLETION_ANY, SHELL_COMPLETION_ANY, SHELL_COMPLETION_ANY
 };
+static const char * const path_job_start_espnow_link_option4[] = {
+    "job", "start", "espnow-link", SHELL_COMPLETION_ANY,
+    SHELL_COMPLETION_ANY, SHELL_COMPLETION_ANY, SHELL_COMPLETION_ANY,
+    SHELL_COMPLETION_ANY
+};
 #endif
 #if SOLAR_OS_PACKAGE_JOB_MESHCORE
 static const char * const path_job_start_meshcore[] = {
@@ -1749,6 +1785,10 @@ static const char * const path_wifi_ap_on_auth[] = {
 static const char * const path_wifi_connect[] = {"wifi", "connect"};
 static const char * const path_wifi_nat[] = {"wifi", "nat"};
 static const char * const path_wifi_forget[] = {"wifi", "forget"};
+#if SOLAR_OS_PACKAGE_SERVICE_WIREGUARD
+static const char * const path_wireguard[] = {"wireguard"};
+static const char * const path_wireguard_up[] = {"wireguard", "up"};
+#endif
 #if SOLAR_OS_PACKAGE_SERVICE_MQTT
 static const char * const path_mqtt[] = {"mqtt"};
 #endif
@@ -2515,6 +2555,8 @@ static const shell_completion_rule_t shell_completion_rules[] = {
     SHELL_COMPLETION_STATIC(path_setterm_charset, setterm_charset_values),
     SHELL_COMPLETION_STATIC(path_setterm_keyboard, setterm_keyboard_values),
     SHELL_COMPLETION_STATIC(path_setterm_keymap, setterm_keyboard_values),
+    SHELL_COMPLETION_STATIC(path_setterm_powerkey, setterm_powerkey_values),
+    SHELL_COMPLETION_STATIC(path_setterm_key, setterm_powerkey_values),
     SHELL_COMPLETION_STATIC(path_setterm_keyrate, setterm_keyrate_values),
     SHELL_COMPLETION_STATIC(path_setterm_typerate, setterm_keyrate_values),
     SHELL_COMPLETION_STATIC(path_setterm_repeat, setterm_keyrate_values),
@@ -2602,6 +2644,8 @@ static const shell_completion_rule_t shell_completion_rules[] = {
                             espnow_link_option_values),
     SHELL_COMPLETION_STATIC(path_job_start_espnow_link_option3,
                             espnow_link_option_values),
+    SHELL_COMPLETION_STATIC(path_job_start_espnow_link_option4,
+                            espnow_link_option_values),
 #endif
 #if SOLAR_OS_PACKAGE_JOB_MESHCORE
     SHELL_COMPLETION_RADIOS(path_job_start_meshcore),
@@ -2664,6 +2708,10 @@ static const shell_completion_rule_t shell_completion_rules[] = {
     SHELL_COMPLETION_STATIC(path_wifi_nat, wifi_nat_subcommands),
     SHELL_COMPLETION_STATIC(path_wifi_forget, wifi_forget_values),
     SHELL_COMPLETION_WIFI_SSIDS(path_wifi_forget),
+#if SOLAR_OS_PACKAGE_SERVICE_WIREGUARD
+    SHELL_COMPLETION_STATIC(path_wireguard, wireguard_subcommands),
+    SHELL_COMPLETION_STATIC(path_wireguard_up, wireguard_policy_values),
+#endif
 #if SOLAR_OS_PACKAGE_SERVICE_NET
     SHELL_COMPLETION_STATIC(path_ping_count, ping_count_values),
     SHELL_COMPLETION_STATIC(path_netscan_ports, netscan_port_values),
@@ -3481,6 +3529,42 @@ static void shell_insert_char(solar_os_context_t *ctx, char ch)
     shell_insert_text(ctx, &ch, 1);
 }
 
+static void shell_paste_clipboard(solar_os_context_t *ctx)
+{
+    size_t clipboard_len = 0;
+    const char *clipboard = solar_os_clipboard_data(&clipboard_len);
+    if (clipboard == NULL || clipboard_len == 0) {
+        return;
+    }
+
+    const bool can_redraw = shell_can_redraw_input(ctx);
+    if (!can_redraw && shell_session(ctx)->input_cursor != shell_session(ctx)->input_len) {
+        return;
+    }
+
+    const size_t paste_start = shell_session(ctx)->input_cursor;
+    const size_t inserted = solar_os_shell_line_paste(
+        shell_session(ctx)->input,
+        sizeof(shell_session(ctx)->input),
+        &shell_session(ctx)->input_len,
+        &shell_session(ctx)->input_cursor,
+        clipboard,
+        clipboard_len);
+    if (inserted == 0) {
+        return;
+    }
+
+    shell_session(ctx)->history_browsing = false;
+    shell_session(ctx)->history_index = -1;
+    if (!can_redraw) {
+        (void)solar_os_shell_io_write_len(shell_io(ctx),
+                                          &shell_session(ctx)->input[paste_start],
+                                          inserted);
+        return;
+    }
+    shell_render_input(ctx);
+}
+
 static void shell_backspace(solar_os_context_t *ctx)
 {
     if (shell_session(ctx)->input_cursor == 0) {
@@ -3741,10 +3825,10 @@ static void shell_note_completion_match(char *match,
 
 typedef bool (*shell_alias_callback_t)(const char *name, int argc, char **argv, void *user);
 
-static bool shell_alias_path(char *path, size_t path_len)
+static bool shell_alias_path(char *path, size_t path_len, const char *file)
 {
-    return solar_os_storage_is_mounted() &&
-        shell_make_state_path(path, path_len, SHELL_ALIAS_FILE);
+    return file != NULL && solar_os_storage_is_mounted() &&
+        shell_make_state_path(path, path_len, file);
 }
 
 static void shell_discard_file_line(FILE *file)
@@ -3760,7 +3844,8 @@ static void shell_alias_ensure_file(void)
 {
     char path[SHELL_PATH_MAX];
 
-    if (!shell_ensure_state_dir() || !shell_alias_path(path, sizeof(path))) {
+    if (!shell_ensure_state_dir() ||
+        !shell_alias_path(path, sizeof(path), SHELL_ALIAS_FILE)) {
         return;
     }
 
@@ -3770,12 +3855,14 @@ static void shell_alias_ensure_file(void)
     }
 }
 
-static bool shell_for_each_alias(shell_alias_callback_t callback, void *user)
+static bool shell_for_each_alias_file(const char *path,
+                                      shell_alias_callback_t callback,
+                                      void *user,
+                                      bool *stopped)
 {
-    char path[SHELL_PATH_MAX];
     char line[SHELL_INPUT_MAX + 1];
 
-    if (callback == NULL || !shell_alias_path(path, sizeof(path))) {
+    if (path == NULL || callback == NULL || stopped == NULL) {
         return false;
     }
 
@@ -3805,6 +3892,7 @@ static bool shell_for_each_alias(shell_alias_callback_t callback, void *user)
         }
 
         if (!callback(alias_argv[0], parsed.argc, alias_argv, user)) {
+            *stopped = true;
             fclose(file);
             return true;
         }
@@ -3812,6 +3900,28 @@ static bool shell_for_each_alias(shell_alias_callback_t callback, void *user)
 
     fclose(file);
     return true;
+}
+
+static bool shell_for_each_alias(shell_alias_callback_t callback, void *user)
+{
+    char path[SHELL_PATH_MAX];
+    bool opened = false;
+    bool stopped = false;
+
+    if (callback == NULL ||
+        !shell_alias_path(path, sizeof(path), SHELL_ALIAS_FILE)) {
+        return false;
+    }
+    opened = shell_for_each_alias_file(path, callback, user, &stopped);
+    if (stopped) {
+        return opened;
+    }
+    if (!shell_alias_path(path,
+                          sizeof(path),
+                          SHELL_PLAYGROUND_ALIAS_FILE)) {
+        return opened;
+    }
+    return shell_for_each_alias_file(path, callback, user, &stopped) || opened;
 }
 
 static bool shell_append_token(char *line, size_t line_len, const char *token)
@@ -8067,17 +8177,10 @@ static bool shell_launch_playground_script(solar_os_context_t *ctx,
             io, "watch: cannot launch foreground app: playground run");
         return true;
     }
-    if (solar_os_playground_init() != ESP_OK ||
-        !solar_os_playground_catalog_available()) {
-        solar_os_shell_io_writeln(
-            io, "playground: catalog unavailable; run playground refresh");
-        return true;
-    }
-
     solar_os_playground_app_info_t script;
-    if (!solar_os_playground_find_app(argv[2], NULL, &script)) {
+    if (!solar_os_playground_find_installed_app(argv[2], &script)) {
         solar_os_shell_io_printf(
-            io, "playground: application not found: %s\n", argv[2]);
+            io, "playground: application is not installed: %s\n", argv[2]);
         return true;
     }
     char path[SOLAR_OS_APP_ARG_LEN];
@@ -8453,6 +8556,9 @@ static void shell_handle_char(solar_os_context_t *ctx, char ch)
         break;
     case '\t':
         shell_complete_command(ctx, repeated_tab);
+        break;
+    case 0x16U:
+        shell_paste_clipboard(ctx);
         break;
     default:
         if (shell_is_printable_char(ch) &&

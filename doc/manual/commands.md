@@ -27,6 +27,10 @@ Wildcard patterns are supported by selected filesystem commands, for example
 Tab completion covers commands, subcommands, filesystem paths, job names, port
 names, and stream IDs where the command exposes enough structure.
 
+`Ctrl+V` pastes the shared SolarOS clipboard at the command-line cursor. Line
+breaks and tabs become spaces, and a paste stops at the shell input limit; it
+never executes a command by itself.
+
 Invalid input is reported as a specific problem followed by only the relevant
 usage line. Close, unambiguous command and subcommand typos include a `did you
 mean` hint; SolarOS never runs the suggested command automatically. Missing,
@@ -44,11 +48,14 @@ path directly; for example, `./somescript.sh` is equivalent to
 bit for this shorthand.
 
 History is kept in memory and cached at `/.shell/history` when storage is
-available. The optional alias file follows the default storage volume:
+available. The optional user alias file follows the default storage volume:
 
 ```text
 /.shell/alias
 ```
+
+Playground separately maintains `/.shell/playground`. Do not edit that file;
+installing, updating, or uninstalling community applications regenerates it.
 
 The startup script source is selected with `setterm startup [flash|sd]` and is
 stored in NVS. Internal flash is the default, including after `nvs clear`. On an
@@ -94,7 +101,7 @@ The display-shell app exit chord is `CTRL+ALT+DEL`. Port shells use `Ctrl+]`.
 | `inbox` | `inbox delete <id>` | Delete one message by its decimal ID. |
 | `inbox` | `inbox clear` | Remove every message. |
 | `inbox` | `inbox post <source> <message>` | Post a message from a shell script or for testing. |
-| `inbox` | `inbox notify [on\|off\|test]` | Show, persist, disable, or test the optional Inbox notification sound. It defaults to off and is unavailable on boards without audio output. |
+| `inbox` | `inbox notify [on\|off\|test]` | Show, persist, disable, or test the Inbox notification sound. It defaults to on and is unavailable on boards without audio output. |
 | `contacts` | `contacts` | Open the searchable provider-neutral contact browser. |
 | `contacts` | `contacts status` | Show contact, endpoint, persistence, PSRAM, and opaque-credential counts. |
 | `contacts` | `contacts list [all\|discovered\|trusted\|blocked]` | List contacts, optionally filtered by endpoint trust. |
@@ -168,13 +175,16 @@ archive hash; after extraction every Markdown page is checked by size and
 SHA-256 before activation. `help reset` returns immediately to the embedded
 manual.
 
-Aliases are stored in `/.shell/alias`, one per line:
+User aliases are stored in `/.shell/alias`, one per line:
 
 ```text
 name command-or-app fixed-args...
 ```
 
 Arguments typed after the alias are appended.
+SolarOS reads the user file before the managed `/.shell/playground` aliases, so
+a user alias with the same name takes precedence. Native commands and firmware
+applications always take precedence over both alias files.
 Tab completion expands the complete fixed alias target. For example,
 `run playground run` completes installed application IDs after `run `.
 
@@ -214,6 +224,7 @@ job for periodic polling.
 | `mem` | `mem [policy]` | Print heap status; `policy` also shows allocation-class counters, guarded fallback limits, and the last tagged failure. |
 | `top` | `top` | Print FreeRTOS task resource information when available. |
 | `sleep` | `sleep` | Enter explicit light sleep. |
+| `suspend` | `suspend` | Turn off the primary display and temporarily use the `lowpower` profile while services and jobs continue. Press KEY to resume. |
 | `power` | See below | Inspect and configure power policy. |
 | `setterm` | See below | Configure terminal/input preferences. Without arguments, opens the display TUI when available. |
 
@@ -223,18 +234,31 @@ job for periodic polling.
 power status
 power profile [performance|balanced|battery|lowpower]
 power idle [off|seconds]
-power key [off|light]
+power key [off|sleep|suspend]
 power sleep
+power suspend
 ```
 
 Profiles:
 
 | Profile | Behavior |
 | --- | --- |
-| `performance` | CPU fixed at 240 MHz, no automatic light sleep. |
-| `balanced` | CPU fixed at 160 MHz, no automatic light sleep. This is the default. |
+| `performance` | CPU fixed at 240 MHz, no automatic light sleep. This is the default. |
+| `balanced` | CPU fixed at 160 MHz, no automatic light sleep. |
 | `battery` | CPU fixed at 160 MHz with ESP-IDF automatic light sleep. |
 | `lowpower` | CPU fixed at 80 MHz with automatic light sleep and display-shell idle sleep after 60 seconds. |
+
+Suspend is different from explicit light sleep. It keeps the runtime, radios,
+background jobs, Inbox notifications, and audio active while the primary
+display is off. It temporarily uses the `lowpower` profile and prevents the
+idle policy from entering explicit light sleep. Another short press of KEY
+resumes the display and restores the selected profile. `power status` shows
+the selected profile, effective profile, and suspend state.
+
+`power key` retains `off` for compatibility. `sleep` uses the existing light
+sleep path, and `suspend` toggles the runtime suspend state. The default for a
+new or cleared NVS configuration is `suspend`; an existing saved value remains
+unchanged.
 
 `setterm` usage:
 
@@ -250,6 +274,7 @@ setterm backlight [0..100]
 setterm profile [vt100|ansi|dumb]
 setterm charset [utf8|ascii]
 setterm keyboard [us|de]
+setterm powerkey [sleep|suspend]
 setterm keyrate [off|1..60 [delay-ms]]
 setterm timezone [UTC|Europe/Berlin|POSIX-TZ]
 setterm startup [flash|sd]
@@ -259,6 +284,10 @@ setterm otaurl [url]
 `setterm keyrate` configures the shared repeat policy for BLE keyboards, fixed
 board buttons, `gpio-keys`, joysticks, ADC D-pads, and future keyboard buses.
 The value is stored in NVS and is available on builds without BLE.
+
+`setterm powerkey` selects the dedicated KEY short-press action. `sleep`
+enters explicit light sleep; `suspend` turns off the display while jobs and
+services continue. `setterm key` is accepted as a shorter alias.
 
 `setterm startup` selects the volume used for `.shell/startup` on the next boot.
 The default is `flash`. Selecting `sd` is rejected on boards without SD support.
@@ -275,7 +304,9 @@ Display layout settings (`orientation`, `font`, `textsize`, `palette`, and
 `statusbar`) apply
 to the current display and its app sessions. Settings on the primary display
 are persistent; settings on secondary or virtual displays such as `web0` are
-runtime-only. `palette` exchanges logical black and white in terminal content
+runtime-only. When no saved values exist, the font defaults to `compact` and
+the text size defaults to `16`. `palette` exchanges logical black and white in
+terminal content
 and in the shared graphics palette; dithered shades are reversed as well. It
 remains independent of hardware inversion modes exposed by `display mode`, and
 does not rewrite an existing framebuffer. On a headless board, a port shell can
@@ -503,6 +534,11 @@ xfer recv <port> <file> --zmodem [--append|--replace]
 | `wifi ap` | `wifi ap on [ssid [password [open|wpa|wpa2|wpa/wpa2]]]` | Start and save SoftAP settings. |
 | `wifi ap` | `wifi ap off` | Stop SoftAP. |
 | `wifi nat` | `wifi nat [status|on|off]` | Configure IPv4 NAT for APSTA. |
+| `wireguard` | `wireguard [status]` | Show profile, tunnel, route, peer, DNS, and kill-switch state without printing key material. |
+| `wireguard` | `wireguard import <file>` | Validate one standard WireGuard client profile and save it in NVS. The source file is not removed. |
+| `wireguard` | `wireguard forget` | Logically remove the saved profile from NVS. Bring the tunnel down first. |
+| `wireguard` | `wireguard up [fail-open\|fail-closed]` | Request the tunnel and reconnect it after Wi-Fi address changes. The default is fail-closed for a full tunnel and fail-open for a split tunnel. |
+| `wireguard` | `wireguard down` | Stop the tunnel, remove its routes, restore DNS, and disable its kill switch. |
 | `ble` | `ble [status]` | Show BLE keyboard state and the current/next boot setting. |
 | `ble` | `ble enable` | Save BLE enabled for the next boot. The current boot is unchanged. |
 | `ble` | `ble disable` | Save BLE disabled for the next boot. The current boot is unchanged. |
@@ -519,6 +555,13 @@ Wi-Fi is enabled by default when no saved setting exists, including after `nvs
 clear`. `wifi on` and `wifi off` control the radio in the current boot. The
 `wifi enable` and `wifi disable` settings take effect only after a reboot.
 Disabling Wi-Fi does not erase saved station, access-point, or NAT settings.
+
+WireGuard accepts one IPv4 interface address, one peer, one optional numeric
+IPv4 DNS server, and at most eight IPv4 `AllowedIPs` prefixes. IPv6 addresses,
+multiple peers, interface hooks, and configuration keys outside the documented
+client subset are rejected. Use `wireguard down` before importing a replacement
+profile or using `wireguard forget`. See [WireGuard VPN client](network.md#wireguard)
+for routing, secret, and disconnect behavior.
 
 BLE is enabled by default when no saved setting exists, including after `nvs
 clear`. The `ble enable` and `ble disable` settings take effect only after a
@@ -657,7 +700,7 @@ available for the compiled board.
 | `radio` | `radio state <name> [sleep|standby|rx|tx]` | Show or change radio operating state. |
 | `radio` | `radio send <name> <text|byte...>` | Send one packet. |
 | `radio` | `radio recv <name> [timeout-ms]` | Receive one packet and print metadata plus payload. |
-| `espnow` | `espnow [status]` | Show ESP-NOW owner, channel, peers, traffic, drops, conflicts, and last error. |
+| `espnow` | `espnow [status]` | Show ESP-NOW owner, channel, PHY, peers, traffic, drops, conflicts, and last error. |
 | `espnow` | `espnow peers\|list` | List persistent configured and volatile learned Link-ID-to-MAC mappings. |
 | `espnow` | `espnow peer add <link-id> <mac>` | Save a persistent unicast peer mapping. |
 | `espnow` | `espnow peer remove <link-id>` | Remove a configured or learned peer mapping. |
@@ -750,10 +793,12 @@ field, and `hpm-hz=<16|25.5|32|51>` changes the controller's HPM frame-rate
 field. These driver values are stored in NVS when changed. The ST7305
 `inverted=` setting controls panel polarity and remains independent of the
 terminal palette selected with `setterm palette`.
-On the CrowPanel SSD1683 path, `refresh=auto` uses a full waveform for the first
-changed frame and after every 19 fast updates, while unchanged frames are
-skipped. `refresh=fast` forces the faster waveform and `refresh=full` forces the
-full waveform on every changed frame.
+On SSD1683 board and expansion targets, `refresh=auto` uses a full waveform for
+the first changed frame and after every 19 non-full updates, while unchanged
+frames are skipped. Waveshare V2 expansion targets use the changed framebuffer
+rectangle and the controller's partial-window waveform for those intermediate
+updates. `refresh=fast` forces a fast full-frame waveform and `refresh=full`
+forces the full cleanup waveform on every changed frame.
 
 Packet radio devices are datagram endpoints registered by expansion drivers, not
 byte-stream ports. The common radio layer preserves packet metadata such as RSSI

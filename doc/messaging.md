@@ -144,7 +144,8 @@ then links the returned Inbox ID using the message key and the current
 generation. Marking a message read updates its linked Inbox entry after
 releasing the messaging lock.
 
-Inbox notification sound is an opt-in persisted policy and defaults to off.
+Inbox notification sound is a persisted policy and defaults to on when the
+board has audio output. It can be disabled with `inbox notify off`.
 Only a newly committed, non-duplicate entry can request it. Bursts are
 coalesced, and the request is dropped while another audio user is active.
 `service.audio-board` owns the bounded tone queue, built-in playback

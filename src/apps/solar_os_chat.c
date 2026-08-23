@@ -12,13 +12,14 @@
 #include <strings.h>
 
 #include "esp_err.h"
-#include "services/solar_os_chat_protocol.h"
+#include "services/solar_os_chat.h"
 #include "solar_os_contacts.h"
 #include "solar_os_keys.h"
 #include "solar_os_memory.h"
 #include "solar_os_messaging.h"
 #include "solar_os_terminal.h"
 #include "solar_os_tui.h"
+#include "solar_os_tui_widgets.h"
 
 #define CHAT_APP_SYSTEM_CHANNEL "system"
 #define CHAT_APP_CHANNEL_COUNT 33
@@ -30,6 +31,7 @@
 #define CHAT_APP_STATUS_MAX 96
 #define CHAT_APP_MIN_COLS 28
 #define CHAT_APP_MIN_ROWS 8
+#define CHAT_APP_TAB_ROWS 1
 #define CHAT_APP_INPUT_ROWS 3
 #define CHAT_APP_DRAIN_EVENTS_PER_TICK 12
 #define CHAT_APP_HISTORY_COUNT 16
@@ -37,9 +39,9 @@
 #define CHAT_APP_STATUS_TEXT_MAX 256
 
 typedef enum {
-    CHAT_APP_FOCUS_MESSAGES,
-    CHAT_APP_FOCUS_CHANNELS,
-} chat_app_focus_t;
+    CHAT_APP_TAB_CHANNELS,
+    CHAT_APP_TAB_CHAT,
+} chat_app_tab_t;
 
 typedef enum {
     CHAT_APP_EVENT_STATUS,
@@ -65,6 +67,7 @@ typedef struct {
 
 typedef struct {
     char name[SOLAR_OS_CHAT_CHANNEL_MAX];
+    char provider_key[SOLAR_OS_MESSAGING_PROVIDER_KEY_MAX];
     solar_os_conversation_id_t conversation_id;
     solar_os_messaging_provider_id_t provider;
     solar_os_conversation_kind_t kind;
@@ -85,7 +88,7 @@ typedef struct {
     bool active;
     bool suspended;
     bool redraw;
-    chat_app_focus_t focus;
+    chat_app_tab_t tab;
     solar_os_tui_t tui;
     solar_os_messaging_provider_id_t filter_provider;
     solar_os_conversation_id_t initial_conversation_id;
@@ -355,29 +358,6 @@ static size_t chat_safe_clip_len(const char *text, size_t max_cols, size_t max_b
     return chat_take_columns(text, max_cols, max_bytes, NULL);
 }
 
-static void chat_write_cell(size_t row,
-                            size_t col,
-                            size_t width,
-                            const char *text,
-                            uint8_t attr)
-{
-    if (width == 0 || row >= solar_os_tui_rows(&chat_app.tui) ||
-        col >= solar_os_tui_cols(&chat_app.tui)) {
-        return;
-    }
-
-    solar_os_tui_fill(&chat_app.tui, row, col, 1, width, ' ', attr);
-    if (text == NULL || text[0] == '\0') {
-        return;
-    }
-
-    char clipped[CHAT_APP_LINE_MAX];
-    const size_t copy_len = chat_safe_clip_len(text, width, sizeof(clipped) - 1U);
-    memcpy(clipped, text, copy_len);
-    clipped[copy_len] = '\0';
-    solar_os_tui_addstr(&chat_app.tui, row, col, clipped, attr);
-}
-
 static uint8_t chat_add_system_channel(void)
 {
     const uint8_t index = chat_app.channel_count++;
@@ -459,6 +439,9 @@ static void chat_refresh_conversations(void)
             strlcpy(conversation->name,
                     snapshot[i].title,
                     sizeof(conversation->name));
+            strlcpy(conversation->provider_key,
+                    snapshot[i].provider_key,
+                    sizeof(conversation->provider_key));
             if (!preferred_found ||
                 (snapshot[i].unread_count != 0 &&
                  chat_app.channels[preferred].unread_count == 0) ||
@@ -1078,7 +1061,7 @@ static void chat_draw_visual_line(const char *line,
     }
 
     if (ctx->visual_index >= ctx->first_visible && ctx->drawn < ctx->max_rows) {
-        chat_write_cell(ctx->row + ctx->drawn, ctx->start_col, ctx->width, line, attr);
+        solar_os_tui_write_cell(&chat_app.tui, ctx->row + ctx->drawn, ctx->start_col, ctx->width, line, attr);
         if (emphasis_bytes > 0 && line != NULL) {
             char emphasis[SOLAR_OS_CHAT_USER_MAX];
             const size_t copy_len = emphasis_bytes < sizeof(emphasis) ?
@@ -1200,12 +1183,28 @@ static size_t chat_find_channel_row(const chat_app_channel_row_t *rows,
     return 0;
 }
 
-static void chat_draw_channels(size_t left_width, size_t body_rows)
+static void chat_draw_tabs(size_t cols)
 {
-    const uint8_t header_attr =
-        chat_app.focus == CHAT_APP_FOCUS_CHANNELS ? SOLAR_OS_TUI_ATTR_INVERSE : SOLAR_OS_TUI_ATTR_BOLD;
+    static const char channels_label[] = " Channels ";
+    static const char chat_label[] = " Chat ";
 
-    chat_write_cell(0, 0, left_width, "conversations", header_attr);
+    solar_os_tui_write_cell(&chat_app.tui, 0, 0, cols, "", SOLAR_OS_TUI_ATTR_NORMAL);
+    solar_os_tui_draw_tab(&chat_app.tui, 0, 0,
+                          sizeof(channels_label) - 1U, channels_label,
+                          chat_app.tab == CHAT_APP_TAB_CHANNELS);
+    solar_os_tui_draw_tab(&chat_app.tui, 0,
+                          sizeof(channels_label) - 1U,
+                          sizeof(chat_label) - 1U, chat_label,
+                          chat_app.tab == CHAT_APP_TAB_CHAT);
+}
+
+static void chat_draw_channels(size_t start_row,
+                               size_t width,
+                               size_t body_rows)
+{
+    const uint8_t header_attr = SOLAR_OS_TUI_ATTR_BOLD;
+
+    solar_os_tui_write_cell(&chat_app.tui, start_row, 0, width, "conversations", header_attr);
 
     const size_t row_count =
         chat_build_channel_rows(chat_app.channel_rows,
@@ -1256,17 +1255,17 @@ static void chat_draw_channels(size_t left_width, size_t body_rows)
             line[0] = '\0';
         }
 
-        chat_write_cell(row + 1, 0, left_width, line, attr);
+        solar_os_tui_write_cell(&chat_app.tui, start_row + row + 1U, 0, width, line, attr);
     }
 }
 
-static void chat_draw_messages(size_t start_col,
+static void chat_draw_messages(size_t start_row,
+                               size_t start_col,
                                size_t width,
                                size_t body_rows)
 {
     char header[128];
-    const uint8_t header_attr =
-        chat_app.focus == CHAT_APP_FOCUS_MESSAGES ? SOLAR_OS_TUI_ATTR_INVERSE : SOLAR_OS_TUI_ATTR_BOLD;
+    const uint8_t header_attr = SOLAR_OS_TUI_ATTR_BOLD;
 
     if (chat_current_is_system()) {
         strlcpy(header, "system  messaging", sizeof(header));
@@ -1282,12 +1281,16 @@ static void chat_draw_messages(size_t start_col,
                  label,
                  chat_provider_state_name(channel->provider));
     }
-    chat_write_cell(0, start_col, width, header, header_attr);
+    solar_os_tui_write_cell(&chat_app.tui, start_row, start_col, width, header, header_attr);
 
     const size_t text_rows = body_rows > 1 ? body_rows - 1 : 0;
 
     for (size_t i = 0; i < text_rows; i++) {
-        chat_write_cell(1 + i, start_col, width, "", SOLAR_OS_TUI_ATTR_NORMAL);
+        solar_os_tui_write_cell(&chat_app.tui, start_row + 1U + i,
+                        start_col,
+                        width,
+                        "",
+                        SOLAR_OS_TUI_ATTR_NORMAL);
     }
 
     if (text_rows == 0 || chat_app.message_count == 0) {
@@ -1315,7 +1318,7 @@ static void chat_draw_messages(size_t start_col,
     chat_draw_visual_ctx_t draw_ctx = {
         .start_col = start_col,
         .width = width,
-        .row = 1U + text_rows - visible_rows,
+        .row = start_row + 1U + text_rows - visible_rows,
         .first_visible = first_visible,
         .max_rows = visible_rows,
     };
@@ -1330,18 +1333,14 @@ static void chat_draw_input(size_t rows, size_t cols)
     }
 
     const size_t sep_row = rows - CHAT_APP_INPUT_ROWS;
-    const size_t help_row = rows - 2U;
-    const size_t input_row = rows - 1U;
-    const uint8_t help_attr = SOLAR_OS_TUI_ATTR_INVERSE;
+    const size_t input_row = rows - 2U;
 
     solar_os_tui_set_cursor_visible(&chat_app.tui, false);
     solar_os_tui_hline(&chat_app.tui, sep_row, 0, cols, 0, SOLAR_OS_TUI_ATTR_NORMAL);
-    chat_write_cell(help_row,
-                    0,
-                    cols,
-                    chat_app.status[0] != '\0' ? chat_app.status :
-                    "TAB pane  ENTER send/open  /help commands  ESC exits",
-                    help_attr);
+    solar_os_tui_draw_help(
+        &chat_app.tui,
+        chat_app.status[0] != '\0' ? chat_app.status :
+            "TAB channels  ENTER send  /help commands  ESC exits");
 
     const size_t input_width = cols > 2U ? cols - 2U : 0U;
     if (chat_app.input_cursor < chat_app.input_view_offset) {
@@ -1368,7 +1367,19 @@ static void chat_draw_input(size_t rows, size_t cols)
     solar_os_tui_move(&chat_app.tui,
                       input_row,
                       cursor_col < cols ? cursor_col : cols - 1U);
-    solar_os_tui_set_cursor_visible(&chat_app.tui, chat_app.focus == CHAT_APP_FOCUS_MESSAGES);
+    solar_os_tui_set_cursor_visible(&chat_app.tui, true);
+}
+
+static void chat_draw_channel_footer(size_t rows, size_t cols)
+{
+    if (rows == 0) {
+        return;
+    }
+    solar_os_tui_set_cursor_visible(&chat_app.tui, false);
+    solar_os_tui_draw_help(
+        &chat_app.tui,
+        chat_app.status[0] != '\0' ? chat_app.status :
+            "UP/DOWN select  ENTER join/open  TAB chat  ESC exits");
 }
 
 static void chat_render(void)
@@ -1378,45 +1389,98 @@ static void chat_render(void)
 
     if (rows < CHAT_APP_MIN_ROWS || cols < CHAT_APP_MIN_COLS) {
         solar_os_tui_clear(&chat_app.tui);
-        chat_write_cell(0, 0, cols, "chat: terminal too small", SOLAR_OS_TUI_ATTR_BOLD);
+        solar_os_tui_draw_too_small(&chat_app.tui, "chat");
         solar_os_tui_refresh(&chat_app.tui);
         return;
     }
 
     solar_os_tui_clear(&chat_app.tui);
 
-    const size_t input_rows = CHAT_APP_INPUT_ROWS;
-    const size_t body_rows = rows > input_rows ? rows - input_rows : rows;
-    size_t left_width = cols / 4U;
-    if (left_width < 12U) {
-        left_width = 12U;
+    chat_draw_tabs(cols);
+    if (chat_app.tab == CHAT_APP_TAB_CHANNELS) {
+        const size_t footer_rows = 1U;
+        const size_t body_rows = rows > CHAT_APP_TAB_ROWS + footer_rows ?
+            rows - CHAT_APP_TAB_ROWS - footer_rows : 0U;
+        chat_draw_channels(CHAT_APP_TAB_ROWS, cols, body_rows);
+        chat_draw_channel_footer(rows, cols);
+    } else {
+        const size_t body_rows = rows > CHAT_APP_TAB_ROWS + CHAT_APP_INPUT_ROWS ?
+            rows - CHAT_APP_TAB_ROWS - CHAT_APP_INPUT_ROWS : 0U;
+        chat_draw_messages(CHAT_APP_TAB_ROWS, 0, cols, body_rows);
+        chat_draw_input(rows, cols);
     }
-    if (left_width > 22U) {
-        left_width = 22U;
-    }
-    if (left_width + 4U >= cols) {
-        left_width = cols / 3U;
-    }
-
-    const size_t split_col = left_width;
-    const size_t message_col = split_col + 1U;
-    const size_t message_width = cols > message_col ? cols - message_col : 0;
-
-    chat_draw_channels(left_width, body_rows);
-    if (body_rows > 0 && split_col < cols) {
-        solar_os_tui_vrule(&chat_app.tui, 0, split_col, body_rows, 1, SOLAR_OS_TUI_ATTR_NORMAL);
-    }
-    chat_draw_messages(message_col, message_width, body_rows);
-    chat_draw_input(rows, cols);
     solar_os_tui_refresh(&chat_app.tui);
     chat_app.redraw = false;
 }
 
+static bool chat_gateway_channel_is_joined(const char *provider_key)
+{
+    if (provider_key == NULL || provider_key[0] == '\0') {
+        return false;
+    }
+    solar_os_chat_channel_t *channels = solar_os_memory_calloc(
+        SOLAR_OS_CHAT_CHANNEL_CAPACITY,
+        sizeof(*channels),
+        SOLAR_OS_MEMORY_EXTERNAL_REQUIRED,
+        "chat.gateway_channels");
+    if (channels == NULL) {
+        return false;
+    }
+    const size_t count = solar_os_chat_channel_snapshot(
+        channels,
+        SOLAR_OS_CHAT_CHANNEL_CAPACITY);
+    bool joined = false;
+    for (size_t i = 0; i < count; i++) {
+        if (strcmp(channels[i].name, provider_key) == 0) {
+            joined = channels[i].joined;
+            break;
+        }
+    }
+    solar_os_memory_free(channels);
+    return joined;
+}
+
+static bool chat_join_channel(const chat_app_channel_t *channel)
+{
+    if (channel == NULL || channel->system ||
+        channel->provider != SOLAR_OS_MESSAGING_PROVIDER_GATEWAY ||
+        (channel->kind != SOLAR_OS_CONVERSATION_ROOM &&
+         channel->kind != SOLAR_OS_CONVERSATION_GROUP)) {
+        return true;
+    }
+    const char *provider_key = channel->provider_key[0] != '\0' ?
+        channel->provider_key : channel->name;
+    if (chat_gateway_channel_is_joined(provider_key)) {
+        return true;
+    }
+    const esp_err_t error = solar_os_chat_join(provider_key);
+    if (error != ESP_OK) {
+        char status[CHAT_APP_STATUS_MAX];
+        snprintf(status,
+                 sizeof(status),
+                 "join failed: %s",
+                 esp_err_to_name(error));
+        chat_set_status(status);
+        return false;
+    }
+    char label[SOLAR_OS_MESSAGING_TITLE_MAX + 2U];
+    char status[CHAT_APP_STATUS_MAX];
+    chat_format_channel_label(channel, label, sizeof(label));
+    snprintf(status, sizeof(status), "joining %s", label);
+    chat_set_status(status);
+    return true;
+}
+
 static void chat_select_channel(uint8_t index, bool join)
 {
-    (void)join;
     if (index >= chat_app.channel_count) {
         return;
+    }
+    if (join) {
+        chat_set_status("");
+        if (!chat_join_channel(&chat_app.channels[index])) {
+            return;
+        }
     }
     chat_app.selected_channel = index;
     chat_app.current_channel = index;
@@ -1427,6 +1491,9 @@ static void chat_select_channel(uint8_t index, bool join)
             chat_app.channels[index].conversation_id);
     }
     chat_app.message_scroll = 0;
+    if (join) {
+        chat_app.tab = CHAT_APP_TAB_CHAT;
+    }
     chat_app.redraw = true;
 
     if (chat_app.channels[index].system) {
@@ -1701,7 +1768,8 @@ static void chat_delete(void)
 static size_t chat_message_scroll_step(void)
 {
     const size_t rows = solar_os_tui_rows(&chat_app.tui);
-    const size_t body_rows = rows > CHAT_APP_INPUT_ROWS ? rows - CHAT_APP_INPUT_ROWS : rows;
+    const size_t reserved_rows = CHAT_APP_TAB_ROWS + CHAT_APP_INPUT_ROWS;
+    const size_t body_rows = rows > reserved_rows ? rows - reserved_rows : rows;
     const size_t text_rows = body_rows > 1U ? body_rows - 1U : 1U;
 
     return text_rows > 1U ? text_rows - 1U : 1U;
@@ -1899,7 +1967,7 @@ static esp_err_t chat_start(solar_os_context_t *ctx)
         return ESP_ERR_NO_MEM;
     }
 
-    chat_app.focus = CHAT_APP_FOCUS_MESSAGES;
+    chat_app.tab = CHAT_APP_TAB_CHANNELS;
     chat_app.history_index = -1;
     chat_app.redraw = true;
     const esp_err_t messaging_error = solar_os_messaging_init();
@@ -1913,13 +1981,15 @@ static esp_err_t chat_start(solar_os_context_t *ctx)
         chat_app_free_state();
         return ESP_ERR_INVALID_ARG;
     }
+    if (chat_app.initial_conversation_id != 0U) {
+        chat_app.tab = CHAT_APP_TAB_CHAT;
+    }
 
-    const esp_err_t tui_err = solar_os_tui_begin(&chat_app.tui, ctx);
+    const esp_err_t tui_err = solar_os_tui_screen_begin(&chat_app.tui, ctx);
     if (tui_err != ESP_OK) {
         chat_app_free_state();
         return tui_err;
     }
-    (void)solar_os_tui_enable_diff(&chat_app.tui, true);
 
     chat_app.messages = chat_app_calloc(CHAT_APP_MESSAGE_COUNT, sizeof(chat_app_message_t));
     chat_app.history = chat_app_calloc(CHAT_APP_HISTORY_COUNT, sizeof(chat_app.history[0]));
@@ -2025,13 +2095,13 @@ static bool chat_event(solar_os_context_t *ctx, const solar_os_event_t *event)
         return true;
     }
     if (ch == '\t') {
-        chat_app.focus = chat_app.focus == CHAT_APP_FOCUS_MESSAGES ?
-            CHAT_APP_FOCUS_CHANNELS : CHAT_APP_FOCUS_MESSAGES;
+        chat_app.tab = chat_app.tab == CHAT_APP_TAB_CHANNELS ?
+            CHAT_APP_TAB_CHAT : CHAT_APP_TAB_CHANNELS;
         chat_app.redraw = true;
         return true;
     }
 
-    if (chat_app.focus == CHAT_APP_FOCUS_CHANNELS) {
+    if (chat_app.tab == CHAT_APP_TAB_CHANNELS) {
         chat_handle_channel_key(ch);
     } else {
         chat_handle_message_key(ctx, ch);

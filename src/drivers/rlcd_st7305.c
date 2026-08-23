@@ -1128,6 +1128,7 @@ static uint8_t rlcd_u8x8_byte_cb(u8x8_t *u8x8, uint8_t message, uint8_t arg_int,
 static uint8_t rlcd_u8x8_display_cb_locked(rlcd_st7305_t *display,
                                            u8x8_t *u8x8,
                                            uint8_t message,
+                                           uint8_t arg_int,
                                            void *arg_ptr)
 {
     (void)u8x8;
@@ -1140,7 +1141,7 @@ static uint8_t rlcd_u8x8_display_cb_locked(rlcd_st7305_t *display,
         rlcd_cancel_idle_lpm_timer(display);
         rlcd_invalidate_shadow(display);
         display->frame_content_changed = false;
-        return 1;
+        return rlcd_checked_cmd(display, arg_int == 0 ? 0x29 : 0x28) ? 1 : 0;
 
     case U8X8_MSG_DISPLAY_REFRESH:
         if (display->frame_content_changed) {
@@ -1235,8 +1236,6 @@ static uint8_t rlcd_u8x8_display_cb_locked(rlcd_st7305_t *display,
 
 static uint8_t rlcd_u8x8_display_cb(u8x8_t *u8x8, uint8_t message, uint8_t arg_int, void *arg_ptr)
 {
-    (void)arg_int;
-
     if (message == U8X8_MSG_DISPLAY_SETUP_MEMORY) {
         u8x8_d_helper_display_setup_memory(u8x8, &st7305_display_info);
         return 1;
@@ -1247,7 +1246,8 @@ static uint8_t rlcd_u8x8_display_cb(u8x8_t *u8x8, uint8_t message, uint8_t arg_i
         return 0;
     }
 
-    const uint8_t result = rlcd_u8x8_display_cb_locked(display, u8x8, message, arg_ptr);
+    const uint8_t result =
+        rlcd_u8x8_display_cb_locked(display, u8x8, message, arg_int, arg_ptr);
     rlcd_give_lock(display);
     return result;
 }

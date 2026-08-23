@@ -9,33 +9,23 @@ packages_any = ["app_python"]
 +++
 # Python text user-interface API
 
-Use `solaros.tui` for an interactive text application that should work on both
-the built-in display terminal and cursor-addressable port shells. It supplies
-screen dimensions, styled text, boxes, key input, and refresh control.
-
-## Minimal application
+Use the shared layout on displays and cursor-addressable port shells:
 
 ```python
-import solaros
 from solaros import tui
-
-while not solaros.should_exit():
-    tui.clear()
-    tui.move(0, 0)
-    tui.addstr("SolarOS TUI", tui.BOLD)
-    tui.move(2, 0)
-    tui.addstr("Press the app-exit key to leave")
-    tui.refresh()
-    tui.getch()
+_, _, body, _, _, _ = tui.layout()
+tui.title("Example")
+tui.cell(body[0], 0, body[3], "Shared layout")
+tui.help("Enter open  Esc exit")
 ```
-
-Read `rows()` and `cols()` instead of assuming terminal dimensions. Keep the
-loop cooperative by checking `solaros.should_exit()`.
 
 ## Quick reference
 
-Python: from solaros import tui. Functions are rows, cols, size, clear, refresh,
-move, write, addstr, putch, hline, vline, vrule, box, fill, and getch.
-Attributes are NORMAL, BOLD, INVERSE; key constants include KEY_ESCAPE and
-navigation keys. Loop while not solaros.should_exit() for an interactive
-foreground app.
+High-level: layout, cell, title, help, tab, list_move, input_edit, input.
+Rectangles are `(row, col, height, width)`. The low-level API remains.
+
+`input(row, col, width, label, text, cursor, view[, attr[, masked]])` draws an
+editable input row. Set `masked=True` to draw one `*` per UTF-8 character. The
+mask is render-only: `text` and the value returned by `input_edit()` remain
+unchanged, so a script must still avoid logging secrets and discard them when
+they are no longer needed.
