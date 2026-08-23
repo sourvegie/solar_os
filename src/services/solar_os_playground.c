@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -302,9 +303,48 @@ static bool playground_parse_semver(const char *text,
                                     unsigned *minor,
                                     unsigned *patch)
 {
-    char trailing = '\0';
-    return text != NULL &&
-        sscanf(text, "%u.%u.%u%c", major, minor, patch, &trailing) == 3;
+    if (text == NULL || major == NULL || minor == NULL || patch == NULL) {
+        return false;
+    }
+
+    unsigned *components[] = {major, minor, patch};
+    const char *cursor = text;
+    for (size_t i = 0; i < sizeof(components) / sizeof(components[0]); i++) {
+        if (!isdigit((unsigned char)*cursor)) {
+            return false;
+        }
+
+        errno = 0;
+        char *end = NULL;
+        const unsigned long value = strtoul(cursor, &end, 10);
+        if (errno == ERANGE || end == cursor || value > UINT_MAX) {
+            return false;
+        }
+        *components[i] = (unsigned)value;
+        cursor = end;
+
+        if (i + 1U < sizeof(components) / sizeof(components[0])) {
+            if (*cursor != '.') {
+                return false;
+            }
+            cursor++;
+        }
+    }
+
+    if (*cursor == '\0') {
+        return true;
+    }
+    if ((*cursor != '-' && *cursor != '+') || cursor[1] == '\0') {
+        return false;
+    }
+
+    for (cursor++; *cursor != '\0'; cursor++) {
+        const unsigned char ch = (unsigned char)*cursor;
+        if (!isalnum(ch) && ch != '.' && ch != '-' && ch != '+' && ch != '_') {
+            return false;
+        }
+    }
+    return true;
 }
 
 static bool playground_version_at_least(const char *current, const char *minimum)
