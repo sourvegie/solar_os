@@ -1,17 +1,9 @@
 #pragma once
 
-#if defined(SOLAR_OS_BOARD_WAVESHARE_ESP32_S3_RLCD_4_2)
-#include "boards/waveshare_esp32_s3_rlcd_4_2.h"
-#elif defined(SOLAR_OS_BOARD_ESP32_S3_DEVKITC1_N16R8)
-#include "boards/esp32_s3_devkitc1_n16r8.h"
-#elif defined(SOLAR_OS_BOARD_ODROID_GO)
-#include "boards/odroid_go.h"
-#elif defined(SOLAR_OS_BOARD_FREENOVE_ESP32_WROVER_V3)
-#include "boards/freenove_esp32_wrover_v3.h"
-#elif defined(SOLAR_OS_BOARD_ELECROW_CROWPANEL_ESP32_S3_4_2_EPAPER)
-#include "boards/elecrow_crowpanel_esp32_s3_4_2_epaper.h"
+#if defined(SOLAR_OS_BOARD_GENERATED)
+#include "solar_os_board_generated.h"
 #else
-#error "No SolarOS board target selected. Build through a PlatformIO env with a matching boards/<target>.cmake profile."
+#error "No SolarOS board target selected. Build through a PlatformIO env with a matching boards/manifests/<target>.toml profile."
 #endif
 
 #ifndef SOLAR_OS_BOARD_ID
@@ -40,6 +32,22 @@
 
 #ifndef SOLAR_OS_BOARD_BUSES
 #define SOLAR_OS_BOARD_BUSES {{0}}
+#endif
+
+#ifndef SOLAR_OS_BOARD_DEFAULT_EXPANSION_DEVICE_COUNT
+#define SOLAR_OS_BOARD_DEFAULT_EXPANSION_DEVICE_COUNT 0
+#endif
+
+#ifndef SOLAR_OS_BOARD_DEFAULT_EXPANSION_DEVICES
+#define SOLAR_OS_BOARD_DEFAULT_EXPANSION_DEVICES {{0}}
+#endif
+
+#ifndef SOLAR_OS_BOARD_DEFAULT_BLE_ENABLED
+#define SOLAR_OS_BOARD_DEFAULT_BLE_ENABLED 1
+#endif
+
+#ifndef SOLAR_OS_BOARD_DISPLAY_FRAME_INTERVAL_MS
+#define SOLAR_OS_BOARD_DISPLAY_FRAME_INTERVAL_MS 0U
 #endif
 
 #ifndef SOLAR_OS_BOARD_CONNECTOR_LAYOUT_TITLE

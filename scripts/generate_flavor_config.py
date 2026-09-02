@@ -19,12 +19,17 @@ class PackageDef:
     depends: tuple[str, ...]
     sources: tuple[str, ...]
     requires: tuple[str, ...]
+    targets: tuple[str, ...]
+    expansion_drivers: tuple[str, ...]
     capabilities: tuple[str, ...]
     any_capabilities: tuple[str, ...]
 
 
 @dataclass(frozen=True)
 class GroupDef:
+    label: str
+    category: str
+    hidden: bool
     immutable: bool
     members: tuple[str, ...]
     triggers: tuple[str, ...]
@@ -81,11 +86,27 @@ def normalize_capability_tuple(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(normalize_capability(value) for value in values if normalize_capability(value))
 
 
+def normalize_target(value: str) -> str:
+    return value.strip().lower().replace("-", "_")
+
+
+def normalize_target_tuple(values: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(normalize_target(value) for value in values if normalize_target(value))
+
+
 def parse_capability_list(text: str) -> set[str]:
     return {
         normalize_capability(value)
         for value in text.replace(",", " ").split()
         if normalize_capability(value)
+    }
+
+
+def parse_package_list(text: str) -> set[str]:
+    return {
+        value.strip()
+        for value in text.replace(",", " ").split()
+        if value.strip()
     }
 
 
@@ -131,6 +152,11 @@ def load_catalog(path: Path) -> PackageCatalog:
             depends=string_tuple(raw.get("depends"), f"packages.{name}.depends"),
             sources=string_tuple(raw.get("sources"), f"packages.{name}.sources"),
             requires=string_tuple(raw.get("requires"), f"packages.{name}.requires"),
+            targets=normalize_target_tuple(
+                string_tuple(raw.get("targets"), f"packages.{name}.targets")),
+            expansion_drivers=string_tuple(
+                raw.get("expansion_drivers"),
+                f"packages.{name}.expansion_drivers"),
             capabilities=normalize_capability_tuple(
                 string_tuple(raw.get("capabilities"), f"packages.{name}.capabilities")),
             any_capabilities=normalize_capability_tuple(
@@ -144,6 +170,19 @@ def load_catalog(path: Path) -> PackageCatalog:
             raise ValueError(
                 f"packages.{name} has unknown dependency/dependencies: "
                 f"{', '.join(unknown_dependencies)}")
+
+    expansion_driver_owners: dict[str, str] = {}
+    for name, package_def in package_defs.items():
+        for symbol in package_def.expansion_drivers:
+            if not symbol.isidentifier():
+                raise ValueError(
+                    f"packages.{name}.expansion_drivers contains invalid C symbol: {symbol}")
+            previous_owner = expansion_driver_owners.get(symbol)
+            if previous_owner is not None:
+                raise ValueError(
+                    f"expansion driver symbol {symbol} is owned by both "
+                    f"{previous_owner} and {name}")
+            expansion_driver_owners[symbol] = name
 
     visiting: set[str] = set()
     visited: set[str] = set()
@@ -183,9 +222,12 @@ def load_catalog(path: Path) -> PackageCatalog:
             raise ValueError(
                 f"groups.{name} cannot own sources or requirements; assign them to packages")
         group_defs[name] = GroupDef(
+            label=str(raw.get("label") or name.replace("_", " ").title()),
+            category=str(raw.get("category") or "Other"),
+            hidden=bool(raw.get("hidden", False)),
             immutable=bool(raw.get("immutable", False)),
             members=members,
-            triggers=triggers,
+            triggers=triggers or members,
             capabilities=normalize_capability_tuple(
                 string_tuple(raw.get("capabilities"), f"groups.{name}.capabilities")),
             any_capabilities=normalize_capability_tuple(
@@ -196,6 +238,23 @@ def load_catalog(path: Path) -> PackageCatalog:
     immutable_groups = [name for name, group in group_defs.items() if group.immutable]
     if not immutable_groups:
         raise ValueError("package catalog must define an immutable bootstrap group")
+
+    group_reachable = {
+        package
+        for group_def in group_defs.values()
+        for package in group_def.members
+    }
+    pending = list(group_reachable)
+    while pending:
+        package = pending.pop()
+        for dependency in package_defs[package].depends:
+            if dependency not in group_reachable:
+                group_reachable.add(dependency)
+                pending.append(dependency)
+    unreachable = sorted(package_set - group_reachable)
+    if unreachable:
+        raise ValueError(
+            "package(s) not reachable from any group: " + ", ".join(unreachable))
 
     return PackageCatalog(
         groups=groups,
@@ -211,7 +270,7 @@ def load_flavor(path: Path,
         data = tomllib.load(file)
 
     flavor = data.get("flavor", {})
-    package_groups = data.get("package_groups", {})
+    package_groups = data.get("groups", data.get("package_groups", {}))
     packages = data.get("packages", {})
     name = str(flavor.get("name") or path.stem)
     description = str(flavor.get("description") or "")
@@ -220,6 +279,8 @@ def load_flavor(path: Path,
     packages_enabled = {package: False for package in catalog.packages}
     package_overrides: dict[str, bool] = {}
 
+    if not isinstance(package_groups, dict):
+        raise ValueError("flavor groups must be a TOML table")
     unknown_groups = sorted(set(package_groups) - set(catalog.groups))
     if unknown_groups:
         raise ValueError(f"unknown package group key(s): {', '.join(unknown_groups)}")
@@ -298,6 +359,35 @@ def capabilities_supported(required: tuple[str, ...],
     return True
 
 
+def enable_required_packages(catalog: PackageCatalog,
+                             packages_enabled: dict[str, bool],
+                             required_packages: set[str]) -> dict[str, bool]:
+    unknown = sorted(required_packages - set(catalog.packages))
+    if unknown:
+        raise ValueError(f"unknown board-required package(s): {', '.join(unknown)}")
+
+    result = dict(packages_enabled)
+    pending = list(required_packages)
+    while pending:
+        package = pending.pop()
+        if result[package]:
+            continue
+        result[package] = True
+        pending.extend(catalog.package_defs[package].depends)
+    return result
+
+
+def apply_update_layout(catalog: PackageCatalog,
+                        packages_enabled: dict[str, bool],
+                        layout: str) -> dict[str, bool]:
+    """Add packages inherent to the physical update layout."""
+    if layout not in {"ota", "single"}:
+        raise ValueError(f"unknown update layout: {layout}")
+    if layout == "single":
+        return dict(packages_enabled)
+    return enable_required_packages(catalog, packages_enabled, {"service_ota"})
+
+
 def apply_board_capability_pruning(catalog: PackageCatalog,
                                    groups_enabled: dict[str, bool],
                                    packages_enabled: dict[str, bool],
@@ -351,6 +441,31 @@ def apply_board_capability_pruning(catalog: PackageCatalog,
     return pruned_groups, pruned_packages
 
 
+def apply_target_pruning(catalog: PackageCatalog,
+                         packages_enabled: dict[str, bool],
+                         target: str) -> dict[str, bool]:
+    normalized_target = normalize_target(target)
+    if not normalized_target:
+        raise ValueError("MCU target is required")
+
+    pruned_packages = dict(packages_enabled)
+    for package, package_def in catalog.package_defs.items():
+        if (pruned_packages[package] and package_def.targets and
+                normalized_target not in package_def.targets):
+            pruned_packages[package] = False
+
+    changed = True
+    while changed:
+        changed = False
+        for package, package_def in catalog.package_defs.items():
+            if not pruned_packages[package]:
+                continue
+            if any(not pruned_packages[dependency] for dependency in package_def.depends):
+                pruned_packages[package] = False
+                changed = True
+    return pruned_packages
+
+
 def collect_sources(catalog: PackageCatalog,
                     groups_enabled: dict[str, bool],
                     packages_enabled: dict[str, bool]) -> list[str]:
@@ -393,6 +508,15 @@ def collect_job_packages(catalog: PackageCatalog,
     ]
 
 
+def collect_expansion_drivers(catalog: PackageCatalog,
+                              packages_enabled: dict[str, bool]) -> list[str]:
+    drivers: list[str] = []
+    for package in catalog.packages:
+        if packages_enabled[package]:
+            drivers.extend(catalog.package_defs[package].expansion_drivers)
+    return unique(drivers)
+
+
 def generate_header(name: str,
                     description: str,
                     groups_enabled: dict[str, bool],
@@ -404,6 +528,7 @@ def generate_header(name: str,
     enabled_packages = [package for package in catalog.packages if packages_enabled[package]]
     enabled_package_labels = [catalog.package_defs[package].label for package in enabled_packages]
     enabled_job_count = len(collect_job_packages(catalog, packages_enabled))
+    expansion_drivers = collect_expansion_drivers(catalog, packages_enabled)
     lines = [
         "/* Generated by scripts/generate_flavor_config.py. Do not edit. */",
         "#pragma once",
@@ -418,6 +543,14 @@ def generate_header(name: str,
         f"#define SOLAR_OS_JOBS_MAX {enabled_job_count}",
         "",
     ]
+    if expansion_drivers:
+        lines.append("#define SOLAR_OS_EXPANSION_DRIVER_SYMBOLS(X) \\")
+        for index, symbol in enumerate(expansion_drivers):
+            suffix = " \\" if index + 1 < len(expansion_drivers) else ""
+            lines.append(f"    X({symbol}){suffix}")
+    else:
+        lines.append("#define SOLAR_OS_EXPANSION_DRIVER_SYMBOLS(X)")
+    lines.append("")
     for group in catalog.groups:
         lines.append(f"#define {package_macro(group)} {1 if groups_enabled[group] else 0}")
     lines.append("")
@@ -473,6 +606,9 @@ def main() -> int:
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--packages", default=DEFAULT_PACKAGE_CATALOG, type=Path)
     parser.add_argument("--board-capabilities", default="")
+    parser.add_argument("--board-required-packages", default="")
+    parser.add_argument("--layout", choices=("ota", "single"), default="ota")
+    parser.add_argument("--target", required=True)
     parser.add_argument("--header", required=True, type=Path)
     parser.add_argument("--cmake", required=True, type=Path)
     args = parser.parse_args()
@@ -480,12 +616,32 @@ def main() -> int:
     try:
         catalog = load_catalog(args.packages)
         name, description, groups_enabled, packages_enabled = load_flavor(args.input, catalog)
+        required_packages = parse_package_list(args.board_required_packages)
+        packages_enabled = enable_required_packages(
+            catalog,
+            packages_enabled,
+            required_packages,
+        )
+        packages_enabled = apply_update_layout(catalog, packages_enabled, args.layout)
+        packages_enabled = apply_target_pruning(
+            catalog,
+            packages_enabled,
+            args.target,
+        )
         groups_enabled, packages_enabled = apply_board_capability_pruning(
             catalog,
             groups_enabled,
             packages_enabled,
             parse_capability_list(args.board_capabilities),
         )
+        unavailable_required = sorted(
+            package for package in required_packages if not packages_enabled[package]
+        )
+        if unavailable_required:
+            raise ValueError(
+                "board-required package(s) unavailable after capability pruning: "
+                + ", ".join(unavailable_required)
+            )
         write_if_changed(args.header,
                          generate_header(name,
                                          description,

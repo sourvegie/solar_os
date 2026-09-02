@@ -54,6 +54,7 @@ typedef struct {
     uint8_t id;
     uint8_t return_session_id;
     const solar_os_app_t *app;
+    solar_os_app_class_t app_class;
     char title[48];
     solar_os_tick_stats_t tick_stats;
 } port_app_session_t;
@@ -119,6 +120,38 @@ static esp_err_t port_app_close(port_shell_state_t *state,
                                 bool return_to_parent,
                                 bool show_prompt_when_idle,
                                 bool allow_terminal_preserve);
+
+static void port_app_report_launch_failure(port_shell_state_t *state,
+                                           const solar_os_app_t *app,
+                                           esp_err_t err)
+{
+    if (state == NULL || state->session == NULL) {
+        return;
+    }
+
+    solar_os_shell_io_t *io = solar_os_shell_session_io(state->session);
+    int exit_code = 1;
+    (void)solar_os_context_take_exit_result(&state->ctx, &exit_code);
+    char message[SOLAR_OS_CONTEXT_STATUS_MESSAGE_MAX] = {0};
+    const bool has_message = solar_os_context_take_status_message(
+        &state->ctx, message, sizeof(message));
+    (void)solar_os_context_take_exit_request(&state->ctx);
+    solar_os_shell_session_set_exit_result(state->session, exit_code, NULL);
+    if (has_message) {
+        solar_os_shell_io_writeln(io, message);
+        return;
+    }
+    const char *name = app != NULL && app->name != NULL ? app->name : "app";
+    if (err == ESP_ERR_NOT_SUPPORTED &&
+        !solar_os_shell_io_is_cursor_addressable(io)) {
+        solar_os_shell_io_printf(io, "%s: can't run on a dumb terminal\n", name);
+        return;
+    }
+    solar_os_shell_io_printf(io,
+                             "%s: launch failed: %s\n",
+                             name,
+                             esp_err_to_name(err));
+}
 
 static bool port_shell_dimensions_valid(uint16_t cols, uint16_t rows)
 {
@@ -409,6 +442,7 @@ static port_app_session_t *port_app_alloc(port_shell_state_t *state,
         session->used = true;
         session->id = port_app_session_id(state, i);
         session->app = app;
+        session->app_class = app->app_class;
         strlcpy(session->title,
                 app->name != NULL ? app->name : "app",
                 sizeof(session->title));
@@ -490,6 +524,8 @@ static void port_shell_show_prompt(port_shell_state_t *state,
         return;
     }
     solar_os_shell_io_t *io = solar_os_shell_session_io(state->session);
+    solar_os_context_set_app_class(&state->ctx,
+                                   solar_os_shell_app()->app_class);
     port_shell_reset_terminal_state(state);
     const bool preserve_terminal =
         solar_os_context_take_terminal_preserve(&state->ctx);
@@ -526,12 +562,14 @@ static esp_err_t port_app_resume(port_shell_state_t *state,
     session->suspended = false;
     portEXIT_CRITICAL(&port_shells_lock);
     solar_os_shell_session_set_foreground_app(state->session, session->app);
+    solar_os_context_set_app_class(&state->ctx, session->app_class);
     if (session->started && session->app->resume != NULL) {
         port_shell_reset_terminal_state(state);
         (void)solar_os_shell_io_clear(
             solar_os_shell_session_io(state->session));
         session->app->resume(&state->ctx);
     }
+    session->app_class = solar_os_context_app_class(&state->ctx);
     port_app_update_title(state, session);
     return ESP_OK;
 }
@@ -634,7 +672,15 @@ static esp_err_t port_app_start(port_shell_state_t *state,
 
     portENTER_CRITICAL(&port_shells_lock);
     session->started = true;
+    session->app_class = solar_os_context_app_class(&state->ctx);
     portEXIT_CRITICAL(&port_shells_lock);
+    if (solar_os_context_take_exit_request(&state->ctx)) {
+        return port_app_close(state,
+                              session->id,
+                              true,
+                              true,
+                              true);
+    }
     port_app_update_title(state, session);
     if (started_session != NULL) {
         *started_session = session;
@@ -698,6 +744,17 @@ static esp_err_t port_app_close(port_shell_state_t *state,
             port_app_by_id(state, session->return_session_id) : NULL;
     const solar_os_app_t *app = session->app;
     solar_os_app_stop(app, &state->ctx);
+    int exit_code = 0;
+    const bool has_exit_result =
+        solar_os_context_take_exit_result(&state->ctx, &exit_code);
+    char message[SOLAR_OS_CONTEXT_STATUS_MESSAGE_MAX] = {0};
+    const bool has_message = solar_os_context_take_status_message(
+        &state->ctx, message, sizeof(message));
+    if (has_exit_result || has_message) {
+        solar_os_shell_session_set_exit_result(state->session,
+                                               has_exit_result ? exit_code : 0,
+                                               has_message ? message : NULL);
+    }
     port_app_release(session);
     portENTER_CRITICAL(&port_shells_lock);
     memset(session, 0, sizeof(*session));
@@ -765,11 +822,7 @@ static esp_err_t port_app_launch(port_shell_state_t *state,
 
     const esp_err_t start_err = port_app_start(state, app, parent, NULL);
     if (start_err != ESP_OK && parent != NULL && parent->used) {
-        solar_os_shell_io_printf(
-            solar_os_shell_session_io(state->session),
-            "%s: launch failed: %s\n",
-            app->name != NULL ? app->name : "app",
-            esp_err_to_name(start_err));
+        port_app_report_launch_failure(state, app, start_err);
         solar_os_shell_io_flush(
             solar_os_shell_session_io(state->session));
         (void)port_app_resume(state, parent);
@@ -951,10 +1004,7 @@ static void port_shell_process_requests(port_shell_state_t *state)
     const esp_err_t launch_err =
         port_app_launch(state, requested_app, policy);
     if (launch_err != ESP_OK) {
-        solar_os_shell_io_printf(solar_os_shell_session_io(state->session),
-                                 "%s: launch failed: %s\n",
-                                 requested_app->name != NULL ? requested_app->name : "app",
-                                 esp_err_to_name(launch_err));
+        port_app_report_launch_failure(state, requested_app, launch_err);
         if (state->active_app_session == NULL) {
             solar_os_shell_session_prompt(&state->ctx, state->session);
         }

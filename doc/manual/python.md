@@ -96,6 +96,7 @@ Optional API groups follow these package gates:
 - `service.wifi`: top-level `wifi_status` and `solaros.wifi`
 - `network.mqtt`: `solaros.mqtt`
 - `network.http-client`: `solaros.http`
+- `network.ftp`: `solaros.ftp`
 - `network.base`: `solaros.net`
 - `network.ssh`: `solaros.ssh_keys`
 - `service.ble`: `solaros.ble`
@@ -344,6 +345,10 @@ upstream MicroPython networking module is exposed.
 - `put(url[, body[, headers[, timeout_ms[, max_bytes[, follow_redirects]]]]])`
 - `patch(url[, body[, headers[, timeout_ms[, max_bytes[, follow_redirects]]]]])`
 - `delete(url[, body[, headers[, timeout_ms[, max_bytes[, follow_redirects]]]]])`
+- `session_open(origin)`
+- `session_request(handle, method, url[, body[, headers[, timeout_ms[, max_bytes]]]])`
+- `session_close(handle)`
+- `session_close_all()`
 - `stream_open(method, url[, body[, headers[, timeout_ms[, follow_redirects]]]])`
 - `stream_read(handle[, timeout_ms])`
 - `stream_close(handle)`
@@ -367,6 +372,17 @@ HTTP error statuses such as 404 and 500 are normal results. Invalid requests,
 allocation failures, cancellation, deadlines, DNS failures, and transport
 errors raise `OSError("ESP_ERR_...")`. Exiting the Python app cancels an active
 request.
+
+`session_open()` retains one same-origin HTTP/TLS client and returns an
+interpreter-owned opaque handle. `origin` contains only the scheme and
+authority, for example `https://example.com`; credentials, paths, queries, and
+fragments are rejected. `session_request()` has the same response and body
+limits as `request()`, but redirects are always disabled and the full request
+URL must match the opened origin. Per-request headers are removed before every
+request. A stale retained connection is retried once only for GET or HEAD and
+only before response headers or body data arrive. Writes are never retried.
+Each runtime can retain two sessions, with four sessions globally. Close
+handles in `finally`; all retained clients also close at interpreter teardown.
 
 `stream_open()` starts a native worker and returns an interpreter-owned opaque
 handle. Unlike `request()`, it has no end-to-end deadline: `timeout_ms` bounds
@@ -403,6 +419,15 @@ response = solaros.http.post(
     {"Content-Type": "application/json"},
 )
 print(response["status_code"], response["body"])
+```
+
+```python
+handle = solaros.http.session_open("https://example.com")
+try:
+    first = solaros.http.session_request(handle, "GET", "https://example.com/a")
+    second = solaros.http.session_request(handle, "GET", "https://example.com/b")
+finally:
+    solaros.http.session_close(handle)
 ```
 
 ```python
@@ -529,32 +554,114 @@ print(solaros.adc.read(1))
 
 ## `solaros.controls`
 
-Continuous controls are named normalized values configured with the `control`
-shell command. Scripts can inspect them and can supply manual controls without
-knowing whether their targets are native app parameters or MIDI CC messages.
+Continuous controls are named normalized values. Python can configure them,
+inspect their runtime counters, and supply manual values without knowing
+whether their targets are native app parameters or MIDI CC messages.
 
-- `list()`: return control dictionaries containing `name`, `source`,
-  `input_min`, `input_max`, `deadband`, `smoothing_ms`, `inverted`,
-  `has_value`, and normalized `value` or `None`.
+- `list()`: return complete control configuration, normalized value, source
+  value, generation, sample/update counters, read errors, and last error.
 - `get(name)`: return the current normalized value from `0.0` through `1.0`.
 - `set(name, value)`: set a manual control to a normalized value from `0.0`
   through `1.0`.
+- `create(name[, source, input_min, input_max, smoothing_ms, deadband,
+  inverted])`: create a manual or scalar-stream control and return its
+  dictionary. Omit `source` or pass `None` for a manual control.
+- `delete(name)` and `clear()`: remove one or all controls. `clear()` returns
+  the number removed.
+- `bindings()`: return parameter/MIDI targets and their pickup, application,
+  and error state.
+- `bind_parameter(name, path[, pickup])` and
+  `bind_midi(name, channel, controller)`: add a target and return its numeric
+  binding ID.
+- `unbind(name)`: remove all targets for a control and return the count.
 
-Create the manual control and its typed binding once from the shell:
-
-```text
-control create expression manual 0 1
-control bind expression parameter synth.filter.resonance pickup=off
-job start controls
-```
-
-Then drive it from Python:
+Create and bind a manual control directly:
 
 ```python
 import solaros
 
+solaros.controls.create("expression")
+solaros.controls.bind_parameter(
+    "expression", "synth.filter.resonance", False
+)
+solaros.jobs.start("controls")
 solaros.controls.set("expression", 0.5)
 print(solaros.controls.get("expression"))
+```
+
+## `solaros.parameters`
+
+Native applications publish parameters only while they are active.
+
+- `list()`: return path, owner, name, label, unit, range, step, curve, current
+  value, readability, and error fields for every published parameter.
+- `get(path)`: read a native-unit value.
+- `set(path, value)`: set a native-unit value and return the authoritative
+  value after range/step handling.
+
+## `solaros.midi`
+
+The MIDI job must own a running MIDI bus before scripts transmit or receive.
+Create the bus with `solaros.buses.create_midi()` and start it with
+`solaros.jobs.start("midi", ["midi0"])`.
+
+- `status()`: return running state, bus name, RX/TX byte and message counts,
+  parser/subscriber/queue drops, last error, CC-stream count, and whether this
+  interpreter has an active receive subscription.
+- `send(status[, data1, data2])`: validate and queue one raw MIDI message. The
+  argument count must match the status byte.
+- `note_on(channel, note[, velocity])`, `note_off(channel, note[, velocity])`,
+  `cc(channel, controller, value)`, and `program(channel, program)`: queue
+  channel messages. Channels are `1..16`; MIDI data is `0..127`.
+- `read([timeout_ms])` or `receive([timeout_ms])`: lazily create a non-consuming
+  interpreter subscription and return the next message dictionary, or `None`.
+  Timeout is bounded to 60 seconds and is cancellation-aware.
+- `close()`: release the receive subscription early. Interpreter shutdown also
+  releases it automatically.
+- `streams()`, `stream_add(channel, controller)`,
+  `stream_remove(channel, controller)`, and `stream_clear()`: manage bounded
+  incoming CC scalar streams.
+
+Received and transmitted message dictionaries contain `status`, `length`,
+`type`, optional `channel`, and the applicable `data1`/`data2` bytes.
+
+```python
+solaros.buses.create_midi("midi0", {"tx": 2, "rx": 3})
+solaros.jobs.start("midi", ["midi0"])
+solaros.midi.note_on(1, 60, 100)
+message = solaros.midi.read(1000)
+```
+
+## `solaros.osc`
+
+OSC bindings configure the native `osc` job; start and stop that worker through
+`solaros.jobs`. The scripting API does not replace its bounded UDP transport,
+peer filtering, or rate limiting.
+
+- `bindings()`: return complete source configuration and runtime availability,
+  value, timing, send, and error telemetry.
+- `bind_stream(name, source, address[, rate_hz, delta, send_always])`: publish
+  a scalar stream and return its binding ID.
+- `bind_event(name, source, address[, edge, rate_hz])`: publish sampled event
+  edges. `edge` is `"rising"`, `"falling"`, or `"both"`.
+- `bind_control(name, control, address[, rate_hz, send_always])`: publish a
+  normalized named control and return its binding ID.
+- `unbind(name)` and `clear()`: remove one or all bindings. `clear()` returns
+  the number removed.
+- `encode_float(address, value)` and `encode_int(address, value)`: return a
+  bounded OSC message as `bytes`, suitable for `solaros.net.udp_send()`.
+- `dispatch(packet)`: validate a message or immediate bundle and apply its
+  native parameter routes; return message, applied, unknown, and rejected
+  counts.
+- `limits()`: return packet, address, binding, bundle/update, and rate limits.
+
+```python
+solaros.osc.bind_stream(
+    "ambient", "temperature", "/room/temperature", 2.0, 0.1
+)
+solaros.jobs.start(
+    "osc", ["listen=9000", "target=192.168.1.50:9001"]
+)
 ```
 
 ## `solaros.pwm`
@@ -727,15 +834,20 @@ service is compiled.
 
 - `drivers()`: return compiled driver dictionaries with `name`, `summary`,
   `required_capabilities`, `probe_supported`, and `supported`.
-- `devices()`: return active device dictionaries and their normalized binding
-  lists.
+- `devices()`: return active device dictionaries with `name`, `driver`,
+  `origin` (`board` or `runtime`), `ready`, `autostart`, `detachable`, and
+  `bindings`. Each normalized binding contains `kind`, `role`, `target`,
+  `value`, and `aux`.
 - `attach(driver, name, bindings)`: attach a driver using a binding dictionary.
 - `detach(name)`: detach a device and release its resource claims and bus leases.
 
 Binding dictionaries accept `spi`, `cs` (or `ce`), `i2c`, `addr`, `uart`,
-`gpio`, `irq`, `reset` (or `rst`), `data`, `bck`, `din`, `rck`, `dc`, `busy`,
-`adc`, `pwm`, and `count`. `cs`
-requires `spi`, and `addr` requires `i2c`. Unknown keys are rejected.
+`ps2`, `gpio`, `irq`, `reset` (or `rst`), `data`, `bck`, `din`, `rck`, `dc`,
+`mclk`, `ws`, `dout`, `busy`, `adc`, `pwm`, `count`, `keys`, `x`, `y`, `min`,
+`center`, `max`, and `deadzone`. `ps2` names an existing PS/2 bus; `x` and `y`
+name scalar streams;
+`keys` maps logical key names to GPIO numbers. `cs` requires `spi`, and `addr`
+requires `i2c`. Unknown keys are rejected.
 
 ```python
 import solaros
@@ -1090,6 +1202,35 @@ finally:
     solaros.net.close(handle)
 ```
 
+## `solaros.ftp`
+
+The package-gated FTP client uses synchronous, unencrypted IPv4 FTP with
+passive data connections. Each call connects, logs in, performs one operation,
+and disconnects:
+
+- `list(host[, path[, username[, password[, port]]]])`
+- `download(host, remote_path, local_path[, username[, password[, port]]])`
+- `upload(host, local_path, remote_path[, username[, password[, port]]])`
+- `mkdir(host, path[, username[, password[, port]]])`
+- `rmdir(host, path[, username[, password[, port]]])`
+- `remove(host, path[, username[, password[, port]]])`
+- `rename(host, old_path, new_path[, username[, password[, port]]])`
+
+The defaults are path `/`, username `anonymous`, password `solaros@`, and port
+`21`. `list()` returns dictionaries with `name`, `is_directory`, and `size`.
+Local paths use the normal SolarOS storage resolver. Calls raise `OSError` on
+DNS, login, protocol, filesystem, cancellation, or transfer failure. FTP does
+not encrypt credentials or file content; use it only on a trusted network.
+
+```python
+import solaros
+
+for item in solaros.ftp.list("fileserver", "/incoming"):
+    print(item["name"], item["size"])
+
+solaros.ftp.upload("fileserver", "/notes/todo.txt", "/incoming/todo.txt")
+```
+
 ## `solaros.ssh_keys`
 
 SSH key functions manage the default SolarOS SSH key pair.
@@ -1185,6 +1326,50 @@ for app in solaros.apps.list():
     print(app["name"], "-", app["summary"])
 ```
 
+## `solaros.input`
+
+Foreground scripts can receive the generic pointer and axis events routed to
+their active session. `sources()` lists registered input sources with `source`,
+`name`, `source_class`, `source_class_name`, `capabilities`, and `ready`.
+
+- `read([timeout_ms])`: return the next pointer or axis event dictionary, or
+  `None`. The maximum timeout is 60000 ms.
+- `clear()`: discard queued pointer and axis events and return the number
+  discarded.
+- `status()`: return `available`, `queued`, `capacity`, and cumulative
+  `dropped` counters.
+
+Pointer dictionaries have `type="pointer"`, source metadata, `pointer_id`,
+numeric and named `mode`/`action`, `x`, `y`, `delta_x`, `delta_y`, `buttons`,
+and `target`. Touch and other absolute sources use `x`/`y`; relative mice use
+the deltas. Axis dictionaries have `type="axis"`, source metadata, numeric and
+named `axis`, `value`, and `delta`.
+
+```python
+import solaros
+from solaros import input as device_input
+
+device_input.clear()
+while not solaros.should_exit():
+    event = device_input.read(100)
+    if event is None:
+        continue
+    if event["type"] == "pointer":
+        if event["mode"] == device_input.MODE_ABSOLUTE:
+            print("touch", event["action_name"], event["x"], event["y"])
+        else:
+            print("mouse", event["delta_x"], event["delta_y"], event["buttons"])
+    else:
+        print("axis", event["axis_name"], event["value"], event["delta"])
+```
+
+The queue holds 16 events. When it is full, the oldest event is discarded so
+the script receives current pointer state; inspect `status()["dropped"]` when
+loss matters. Event reads are available only to a foreground Python app. Agent
+or other headless source runners report `available=False` and return `None`.
+Keyboard characters and navigation keys remain available through
+`solaros.tui.getch()`.
+
 ## `solaros.tui`
 
 TUI functions provide a small curses-like text UI layer over the SolarOS terminal. Drawing calls are queued onto the foreground UI side, so Python scripts do not write terminal memory directly.
@@ -1201,7 +1386,7 @@ Functions:
 - `cols()`: return terminal columns.
 - `size()`: return `(rows, cols)`.
 - `clear()`: clear the terminal.
-- `refresh()`: force a display refresh.
+- `refresh()`: atomically commit the buffered TUI frame and flush it.
 - `move(row, col)`: move the terminal cursor.
 - `write(text[, attr])`: write at the current cursor.
 - `addstr(row, col, text[, attr])`: move and write text.
@@ -1213,7 +1398,9 @@ Functions:
 - `fill(row, col, height, width[, ch[, attr]])`: fill a rectangle.
 - `getch([timeout_ms])`: return a key code or `None`.
 
-Common key constants include `KEY_UP`, `KEY_DOWN`, `KEY_LEFT`, `KEY_RIGHT`, `KEY_HOME`, `KEY_END`, `KEY_DELETE`, `KEY_ESCAPE`, `KEY_PAGE_UP`, and `KEY_PAGE_DOWN`.
+Common key constants include `KEY_UP`, `KEY_DOWN`, `KEY_LEFT`, `KEY_RIGHT`,
+`KEY_CTRL_LEFT`, `KEY_CTRL_RIGHT`, `KEY_HOME`, `KEY_END`, `KEY_DELETE`,
+`KEY_ESCAPE`, `KEY_PAGE_UP`, and `KEY_PAGE_DOWN`.
 
 Example:
 
@@ -1253,7 +1440,12 @@ Colors:
 - `BLACK`
 - `GRAY_MAX`: maximum grayscale level accepted by `gray(level)`, currently `16`.
 
-`gray(level)` returns an encoded grayscale color. Level `0` is black and `GRAY_MAX` is white. Intermediate levels are rendered with ordered spatial dithering on the reflective 1-bit framebuffer.
+`gray(level)` returns a semantic shade from the `setterm foreground` color at
+level `0` to the `setterm background` color at `GRAY_MAX`; `BLACK`, `DARK`,
+`LIGHT`, and `WHITE` use the same theme range. `rgb(red, green, blue)` returns
+an explicit RGB color from three `0..255` components. Color-capable TFT targets
+preserve explicit RGB values in an indexed-color canvas. One-bit targets keep
+the existing luminance and ordered-dither path.
 
 Fonts:
 
@@ -1278,6 +1470,7 @@ Functions:
 - `size()`: return `(width, height)`.
 - `clear([color])`: clear the graphics buffer, defaulting to `WHITE`.
 - `gray(level)`: return a grayscale color value from `0` to `GRAY_MAX`.
+- `rgb(red, green, blue)`: return an RGB color; each component is `0..255`.
 - `color([color])`: get or set current drawing color.
 - `set_color(color)`: alias for `color(color)`.
 - `font([font])`: get or set current text font.
@@ -1373,6 +1566,8 @@ The Python bridge intentionally does not expose raw SSH/SCP session handles yet.
 ## Quick reference
 
 Import `solaros` and use its service tables for storage, time, networking,
-hardware, jobs, sessions, TUI, and graphics. APIs return `None` or raise
-`OSError` as documented. Long-running programs must yield cooperatively and
-release opened buses, graphics targets, and other resources in `finally`.
+hardware, jobs, sessions, input, TUI, and graphics. Foreground pointer and axis
+events use solaros.input sources, read, clear, and status; keyboard characters
+use solaros.tui.getch(). APIs return `None` or raise `OSError` as documented.
+Long-running programs must yield cooperatively and release opened buses,
+graphics targets, and other resources in `finally`.

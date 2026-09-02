@@ -22,6 +22,7 @@ static const board_capability_name_t capability_names[] = {
     {SOLAR_OS_BOARD_CAP_AUDIO_INPUT, "audio_input"},
     {SOLAR_OS_BOARD_CAP_WIFI, "wifi"},
     {SOLAR_OS_BOARD_CAP_BLE, "ble"},
+    {SOLAR_OS_BOARD_CAP_PS2_KEYBOARD, "ps2_keyboard"},
     {SOLAR_OS_BOARD_CAP_GPIO, "gpio"},
     {SOLAR_OS_BOARD_CAP_ADC, "adc"},
     {SOLAR_OS_BOARD_CAP_PWM, "pwm"},
@@ -41,6 +42,8 @@ static const board_capability_name_t capability_names[] = {
     {SOLAR_OS_BOARD_CAP_TEMPERATURE, "temperature"},
     {SOLAR_OS_BOARD_CAP_HUMIDITY, "humidity"},
     {SOLAR_OS_BOARD_CAP_SIMD, "simd"},
+    {SOLAR_OS_BOARD_CAP_POINTER, "pointer"},
+    {SOLAR_OS_BOARD_CAP_STREAMING_DISPLAY, "streaming_display"},
 };
 
 solar_os_board_capabilities_t solar_os_board_capabilities(void)
@@ -59,6 +62,7 @@ solar_os_board_capabilities_t solar_os_board_capabilities(void)
         (SOLAR_OS_BOARD_HAS_AUDIO_INPUT ? SOLAR_OS_BOARD_CAP_AUDIO_INPUT : 0U) |
         (SOLAR_OS_BOARD_HAS_WIFI ? SOLAR_OS_BOARD_CAP_WIFI : 0U) |
         (SOLAR_OS_BOARD_HAS_BLE ? SOLAR_OS_BOARD_CAP_BLE : 0U) |
+        (SOLAR_OS_BOARD_HAS_PS2_KEYBOARD ? SOLAR_OS_BOARD_CAP_PS2_KEYBOARD : 0U) |
         (SOLAR_OS_BOARD_HAS_GPIO ? SOLAR_OS_BOARD_CAP_GPIO : 0U) |
         (SOLAR_OS_BOARD_HAS_ADC ? SOLAR_OS_BOARD_CAP_ADC : 0U) |
         (SOLAR_OS_BOARD_HAS_PWM ? SOLAR_OS_BOARD_CAP_PWM : 0U) |
@@ -78,6 +82,9 @@ solar_os_board_capabilities_t solar_os_board_capabilities(void)
         (SOLAR_OS_BOARD_HAS_TEMPERATURE ? SOLAR_OS_BOARD_CAP_TEMPERATURE : 0U) |
         (SOLAR_OS_BOARD_HAS_HUMIDITY ? SOLAR_OS_BOARD_CAP_HUMIDITY : 0U) |
         (SOLAR_OS_BOARD_HAS_SIMD ? SOLAR_OS_BOARD_CAP_SIMD : 0U) |
+        (SOLAR_OS_BOARD_HAS_POINTER ? SOLAR_OS_BOARD_CAP_POINTER : 0U) |
+        (SOLAR_OS_BOARD_HAS_STREAMING_DISPLAY ?
+             SOLAR_OS_BOARD_CAP_STREAMING_DISPLAY : 0U) |
         (SOLAR_OS_BOARD_HAS_PSRAM ? SOLAR_OS_BOARD_CAP_PSRAM : 0U);
 }
 

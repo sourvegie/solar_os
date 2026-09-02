@@ -1,6 +1,7 @@
 #include "solar_os_shell.h"
 
 #include "solar_os_shell_commands.h"
+#include "solar_os_shell_completion.h"
 #include "solar_os_shell_common.h"
 #include "solar_os_shell_io.h"
 #include "solar_os_shell_launch.h"
@@ -19,6 +20,7 @@
 #include "esp_attr.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
 #include "freertos/task.h"
 #include "nvs.h"
 #include "solar_os_app_registry.h"
@@ -47,6 +49,7 @@
 #endif
 #include "solar_os_gpio.h"
 #include "solar_os_identity.h"
+#include "solar_os_input.h"
 #if SOLAR_OS_PACKAGE_APP_INBOX
 #include "solar_os_inbox.h"
 #endif
@@ -76,10 +79,16 @@
 #include "solar_os_link.h"
 #include "solar_os_link_stream.h"
 #endif
+#if SOLAR_OS_PACKAGE_JOB_MESHCORE
+#include "solar_os_meshcore_stream.h"
+#endif
 #include "solar_os_ramfs.h"
 #include "solar_os_sessions.h"
 #include "solar_os_storage.h"
 #include "solar_os_stream.h"
+#if SOLAR_OS_PACKAGE_SERVICE_SSH
+#include "solar_os_ssh.h"
+#endif
 #include "solar_os_terminal.h"
 #if SOLAR_OS_PACKAGE_SERVICE_WIFI
 #include "solar_os_wifi.h"
@@ -98,6 +107,7 @@
 #define SHELL_NVS_STARTUP_SOURCE_KEY "startup_src"
 #define SHELL_SCRIPT_MAX_DEPTH 3
 #define SHELL_ALIAS_MAX_DEPTH 4
+#define SHELL_WAIT_MAX_SECONDS 86400U
 #define SHELL_WATCH_DEFAULT_INTERVAL_MS 2000U
 #define SHELL_WATCH_MIN_INTERVAL_MS 1000U
 #define SHELL_WATCH_MAX_INTERVAL_MS 86400000U
@@ -105,6 +115,8 @@
 #define SHELL_LOG_FOLLOW_BATCH 8
 #define SHELL_ARRAY_COUNT(array) (sizeof(array) / sizeof((array)[0]))
 #define SHELL_COMPLETION_ANY "*"
+/* Scripts and aliases nest dispatch, so keep large rare-path helper frames separate. */
+#define SHELL_NOINLINE __attribute__((noinline))
 #define SHELL_PORT_TERM_MIN_COLS 20U
 #define SHELL_PORT_TERM_MIN_ROWS 8U
 #define SHELL_PORT_TERM_MAX_COLS 300U
@@ -123,59 +135,71 @@ typedef struct {
     char scp_paths[2][SHELL_PATH_MAX];
 } shell_app_launch_storage_t;
 
+typedef enum {
+    SHELL_COMPLETION_SOURCE_NONE,
+    SHELL_COMPLETION_SOURCE_COMMANDS,
+    SHELL_COMPLETION_SOURCE_APPS,
+    SHELL_COMPLETION_SOURCE_JOBS,
+    SHELL_COMPLETION_SOURCE_MANUAL_PAGES,
+    SHELL_COMPLETION_SOURCE_MANUAL_REFERENCES,
+    SHELL_COMPLETION_SOURCE_AGENT_CONVERSATIONS,
+    SHELL_COMPLETION_SOURCE_INBOX_IDS,
+    SHELL_COMPLETION_SOURCE_MESSAGE_IDS,
+    SHELL_COMPLETION_SOURCE_CONTACT_IDS,
+    SHELL_COMPLETION_SOURCE_ENDPOINT_IDS,
+    SHELL_COMPLETION_SOURCE_PLAYGROUND_APPS,
+    SHELL_COMPLETION_SOURCE_AUDIO_OUTPUTS,
+    SHELL_COMPLETION_SOURCE_EXPANSION_DRIVERS,
+    SHELL_COMPLETION_SOURCE_EXPANSION_DEVICES,
+    SHELL_COMPLETION_SOURCE_CONNECTORS,
+    SHELL_COMPLETION_SOURCE_DISPLAY_SESSION_IDS,
+    SHELL_COMPLETION_SOURCE_SESSION_IDS,
+    SHELL_COMPLETION_SOURCE_PORTS,
+    SHELL_COMPLETION_SOURCE_RADIOS,
+    SHELL_COMPLETION_SOURCE_LINKS,
+    SHELL_COMPLETION_SOURCE_LINK_STREAMS,
+    SHELL_COMPLETION_SOURCE_MESHCORE_STREAMS,
+    SHELL_COMPLETION_SOURCE_RADIO_PROFILES,
+    SHELL_COMPLETION_SOURCE_USER_RADIO_PROFILES,
+    SHELL_COMPLETION_SOURCE_RAMFS_MOUNTS,
+    SHELL_COMPLETION_SOURCE_STORAGE_MOUNTABLES,
+    SHELL_COMPLETION_SOURCE_STORAGE_BLOCKS,
+    SHELL_COMPLETION_SOURCE_STORAGE_UNMOUNT_TARGETS,
+    SHELL_COMPLETION_SOURCE_DISPLAY_TARGETS,
+    SHELL_COMPLETION_SOURCE_DISPLAY_MODES,
+    SHELL_COMPLETION_SOURCE_INPUT_SOURCES,
+    SHELL_COMPLETION_SOURCE_GPIO_PINS,
+    SHELL_COMPLETION_SOURCE_I2C_ARGUMENTS,
+    SHELL_COMPLETION_SOURCE_ONEWIRE_BUSES,
+    SHELL_COMPLETION_SOURCE_PS2_BUSES,
+    SHELL_COMPLETION_SOURCE_MIDI_BUSES,
+    SHELL_COMPLETION_SOURCE_SPI_BUSES,
+    SHELL_COMPLETION_SOURCE_UART_BUSES,
+    SHELL_COMPLETION_SOURCE_COM_ARGUMENTS,
+    SHELL_COMPLETION_SOURCE_UART_ARGUMENTS,
+    SHELL_COMPLETION_SOURCE_BUSES,
+    SHELL_COMPLETION_SOURCE_SPI_CS,
+    SHELL_COMPLETION_SOURCE_STREAMS,
+    SHELL_COMPLETION_SOURCE_CONTROLS,
+    SHELL_COMPLETION_SOURCE_PARAMETERS,
+    SHELL_COMPLETION_SOURCE_WIFI_SSIDS,
+} shell_completion_source_t;
+
+enum {
+    SHELL_COMPLETION_FLAG_PATH = 1U << 0,
+    SHELL_COMPLETION_FLAG_DIRS_ONLY = 1U << 1,
+    SHELL_COMPLETION_FLAG_SCALAR_STREAMS = 1U << 2,
+    SHELL_COMPLETION_FLAG_ABSOLUTE_POINTERS = 1U << 3,
+};
+
 typedef struct {
     const char * const *path;
     size_t path_count;
     const char * const *values;
     size_t value_count;
     const char *required_prefix;
-    bool complete_commands;
-    bool complete_apps;
-    bool complete_jobs;
-    bool complete_manual_pages;
-    bool complete_manual_references;
-    bool complete_agent_conversations;
-    bool complete_inbox_ids;
-    bool complete_message_ids;
-    bool complete_contact_ids;
-    bool complete_endpoint_ids;
-    bool complete_playground_apps;
-    bool complete_audio_outputs;
-    bool complete_expansion_drivers;
-    bool complete_expansion_devices;
-    bool complete_connectors;
-    bool complete_display_session_ids;
-    bool complete_session_ids;
-    bool complete_ports;
-    bool complete_radios;
-    bool complete_links;
-    bool complete_link_streams;
-    bool complete_radio_profiles;
-    bool complete_user_radio_profiles;
-    bool complete_ramfs_mounts;
-    bool complete_storage_mountables;
-    bool complete_storage_blocks;
-    bool complete_storage_unmount_targets;
-    bool complete_display_targets;
-    bool complete_display_modes;
-    bool complete_gpio_pins;
-    bool complete_i2c_arguments;
-    bool complete_onewire_buses;
-    bool complete_ps2_buses;
-    bool complete_midi_buses;
-    bool complete_spi_buses;
-    bool complete_uart_buses;
-    bool complete_com_arguments;
-    bool complete_uart_arguments;
-    bool complete_buses;
-    bool complete_spi_cs;
-    bool complete_streams;
-    bool scalar_streams_only;
-    bool complete_controls;
-    bool complete_parameters;
-    bool complete_wifi_ssids;
-    bool complete_path;
-    bool dirs_only;
+    shell_completion_source_t source;
+    uint8_t flags;
 } shell_completion_rule_t;
 
 struct solar_os_shell_session {
@@ -198,8 +222,10 @@ struct solar_os_shell_session {
     bool watch_active;
     bool watch_executing;
     bool log_follow_active;
+    bool exit_message_pending;
     uint8_t script_depth;
     uint8_t alias_depth;
+    int last_exit_code;
     uint32_t watch_interval_ms;
     uint32_t watch_next_ms;
     uint32_t log_follow_next_ms;
@@ -207,6 +233,7 @@ struct solar_os_shell_session {
     solar_os_log_level_t log_follow_level;
     const solar_os_app_t *foreground_app;
     char watch_command[SHELL_INPUT_MAX];
+    char exit_message[SOLAR_OS_CONTEXT_STATUS_MESSAGE_MAX];
     solar_os_shell_io_t io;
 };
 
@@ -326,7 +353,9 @@ esp_err_t solar_os_shell_startup_path(char *path, size_t path_len)
 }
 
 static void cmd_commands(solar_os_context_t *ctx, int argc, char **argv);
+static void cmd_echo(solar_os_context_t *ctx, int argc, char **argv);
 static void cmd_sh(solar_os_context_t *ctx, int argc, char **argv);
+static void cmd_wait(solar_os_context_t *ctx, int argc, char **argv);
 static void cmd_watch(solar_os_context_t *ctx, int argc, char **argv);
 static void cmd_reboot(solar_os_context_t *ctx, int argc, char **argv);
 static void cmd_exit(solar_os_context_t *ctx, int argc, char **argv);
@@ -362,11 +391,14 @@ static const shell_command_t shell_builtin_commands[] = {
     {"pkg", "show compiled packages", solar_os_shell_cmd_pkg},
     {"board", "show board capabilities", solar_os_shell_cmd_board},
     {"identity", "show or configure device identity", solar_os_shell_cmd_identity},
+    {"input", "show input sources", solar_os_shell_cmd_input},
 #if SOLAR_OS_PACKAGE_SERVICE_ENGINES
     {"engine", "show engine utilization", solar_os_shell_cmd_engine},
 #endif
     {"display", "list display targets", solar_os_shell_cmd_display},
     {"clear", "clear the screen", solar_os_shell_cmd_clear},
+    {"echo", "print text", cmd_echo},
+    {"wait", "pause the calling shell", cmd_wait},
     {"sleep", "enter light sleep", solar_os_shell_cmd_sleep},
     {"suspend", "keep services running with the display off", solar_os_shell_cmd_suspend},
     {"power", "power profile and sleep policy", solar_os_shell_cmd_power},
@@ -422,9 +454,6 @@ static const shell_command_t shell_builtin_commands[] = {
 #if SOLAR_OS_PACKAGE_SERVICE_ADC_DPAD
     {"dpad", "ADC D-pad tools", solar_os_shell_cmd_dpad},
 #endif
-#if SOLAR_OS_PACKAGE_SERVICE_JOYSTICK
-    {"joystick", "analog joystick tools", solar_os_shell_cmd_joystick},
-#endif
 #if SOLAR_OS_PACKAGE_SERVICE_BLE
     {"ble", "BLE keyboard control", solar_os_shell_cmd_ble},
 #endif
@@ -455,6 +484,9 @@ static const shell_command_t shell_builtin_commands[] = {
 #endif
 #if SOLAR_OS_PACKAGE_SERVICE_CONTROLS
     {"control", "map continuous controls", solar_os_shell_cmd_control},
+#endif
+#if SOLAR_OS_PACKAGE_SERVICE_OSC
+    {"osc", "configure OSC bindings", solar_os_shell_cmd_osc},
 #endif
 #if SOLAR_OS_PACKAGE_SERVICE_I2C
     {"i2c", "I2C bus tools", solar_os_shell_cmd_i2c},
@@ -536,6 +568,7 @@ static bool shell_builtin_command_exists(const char *name)
 }
 
 static const char * const setterm_subcommands[] = {
+    "--display",
     "orientation",
     "font",
     "textsize",
@@ -547,6 +580,9 @@ static const char * const setterm_subcommands[] = {
     "charset",
     "keyboard",
     "keymap",
+#if SOLAR_OS_PACKAGE_SERVICE_BLE
+    "ble",
+#endif
     "powerkey",
     "key",
     "keyrate",
@@ -558,6 +594,10 @@ static const char * const setterm_subcommands[] = {
     "ota",
 };
 
+static const char * const setterm_display_settings[] = {
+    "orientation", "font", "textsize", "palette", "statusbar",
+};
+
 static const char * const setterm_orientation_values[] = {"0", "90", "180", "270"};
 static const char * const setterm_font_values[] = {"mono", "compact"};
 static const char * const setterm_textsize_values[] = {"10", "12", "14", "16", "18", "20"};
@@ -567,6 +607,9 @@ static const char * const setterm_brightness_values[] = {"0", "25", "50", "75", 
 static const char * const setterm_profile_values[] = {"vt100", "ansi", "dumb"};
 static const char * const setterm_charset_values[] = {"utf8", "ascii"};
 static const char * const setterm_keyboard_values[] = {"us", "de", "ru"};
+#if SOLAR_OS_PACKAGE_SERVICE_BLE
+static const char * const setterm_ble_values[] = {"default", "on", "off"};
+#endif
 static const char * const setterm_powerkey_values[] = {"sleep", "suspend"};
 static const char * const setterm_keyrate_values[] = {"off"};
 static const char * const setterm_timezone_values[] = {"UTC", "Europe/Berlin"};
@@ -577,6 +620,12 @@ static const char * const display_subcommands[] = {
     "test",
     "mode",
 };
+static const char * const input_subcommands[] = {
+    "status", "test", "calibrate", "keyboard", "touch", "mouse", "joystick",
+    "dpad", "buttons",
+};
+static const char * const input_class_subcommands[] = {"status"};
+static const char * const input_calibration_subcommands[] = {"set", "reset"};
 
 #if SOLAR_OS_PACKAGE_SERVICE_ENGINES
 static const char * const engine_subcommands[] = {"status", "list", "reset"};
@@ -591,6 +640,7 @@ static const char * const ble_subcommands[] = {
     "status",
     "enable",
     "disable",
+    "default",
     "scan",
     "pair",
     "forget",
@@ -717,7 +767,7 @@ static const char * const pocsag_polarity_values[] = {"normal", "inverted"};
 #endif
 #if SOLAR_OS_PACKAGE_JOB_MESHCORE
 static const char * const meshcore_subcommands[] = {
-    "status", "identity", "name", "advert", "channel",
+    "status", "identity", "name", "advert", "channel", "stream",
 };
 static const char * const meshcore_identity_subcommands[] = {
     "show", "generate", "import", "export",
@@ -727,6 +777,10 @@ static const char * const meshcore_channel_subcommands[] = {
 };
 static const char * const meshcore_advert_values[] = {"zero", "flood"};
 static const char * const meshcore_on_off_values[] = {"off", "on"};
+static const char * const meshcore_stream_subcommands[] = {
+    "status", "list", "create", "remove",
+};
+static const char * const meshcore_stream_port_values[] = {"mser0", "mser1"};
 #endif
 
 static const char * const disk_subcommands[] = {
@@ -787,7 +841,11 @@ static const char * const expansion_subcommands[] = {
 static const char * const expansion_bus_subcommands[] = {"create", "attach", "detach", "remove"};
 #if SOLAR_OS_PACKAGE_JOB_MIDI
 static const char * const midi_subcommands[] = {
-    "status", "note-on", "note-off", "cc", "program", "send",
+    "status", "monitor", "note-on", "note-off", "cc", "program", "send",
+    "stream",
+};
+static const char * const midi_stream_subcommands[] = {
+    "list", "add", "remove", "clear",
 };
 #endif
 #if SOLAR_OS_PACKAGE_SERVICE_CONTROLS
@@ -826,6 +884,12 @@ static const char * const neopixel_subcommands[] = {
     "clear",
     "show",
 };
+#endif
+#if SOLAR_OS_PACKAGE_SERVICE_OSC
+static const char * const osc_subcommands[] = {
+    "bindings", "bind", "unbind", "clear",
+};
+static const char * const osc_source_types[] = {"stream", "control"};
 #endif
 
 static const char * const radio_subcommands[] = {
@@ -1141,15 +1205,6 @@ static const char * const dpad_calibrate_subcommands[] = {
     "reset",
 };
 
-static const char * const joystick_subcommands[] = {
-    "status",
-    "calibrate",
-};
-
-static const char * const joystick_calibrate_subcommands[] = {
-    "reset",
-};
-
 static const char * const pwm_subcommands[] = {
     "status",
     "set",
@@ -1256,7 +1311,7 @@ static const char * const aplay_options[] = {"-v"};
 static const char * const aplay_volume_values[] = {"0", "25", "50", "75", "100"};
 #endif
 #if SOLAR_OS_PACKAGE_APP_ARECORD
-static const char * const arecord_options[] = {"-d"};
+static const char * const arecord_options[] = {"-d", "-i"};
 static const char * const arecord_duration_values[] = {"1", "5", "10", "30", "60"};
 #endif
 #if SOLAR_OS_PACKAGE_APP_RECORDER
@@ -1338,6 +1393,7 @@ static const char * const path_aplay_volume[] = {"aplay", "-v"};
 #if SOLAR_OS_PACKAGE_APP_ARECORD
 static const char * const path_arecord[] = {"arecord"};
 static const char * const path_arecord_duration[] = {"arecord", "-d"};
+static const char * const path_arecord_input[] = {"arecord", "-i"};
 #endif
 #if SOLAR_OS_PACKAGE_APP_CLOCK
 static const char * const path_clock[] = {"clock"};
@@ -1456,6 +1512,25 @@ static const char * const man_options[] = {"--list", "--apropos", "-k"};
 static const char * const path_help[] = {"help"};
 static const char * const help_subcommands[] = {"status", "update", "reset"};
 static const char * const path_setterm[] = {"setterm"};
+static const char * const path_setterm_display[] = {"setterm", "--display"};
+static const char * const path_setterm_display_target[] = {
+    "setterm", "--display", SHELL_COMPLETION_ANY,
+};
+static const char * const path_setterm_display_orientation[] = {
+    "setterm", "--display", SHELL_COMPLETION_ANY, "orientation",
+};
+static const char * const path_setterm_display_font[] = {
+    "setterm", "--display", SHELL_COMPLETION_ANY, "font",
+};
+static const char * const path_setterm_display_textsize[] = {
+    "setterm", "--display", SHELL_COMPLETION_ANY, "textsize",
+};
+static const char * const path_setterm_display_palette[] = {
+    "setterm", "--display", SHELL_COMPLETION_ANY, "palette",
+};
+static const char * const path_setterm_display_statusbar[] = {
+    "setterm", "--display", SHELL_COMPLETION_ANY, "statusbar",
+};
 static const char * const path_setterm_orientation[] = {"setterm", "orientation"};
 static const char * const path_setterm_font[] = {"setterm", "font"};
 static const char * const path_setterm_textsize[] = {"setterm", "textsize"};
@@ -1467,6 +1542,9 @@ static const char * const path_setterm_profile[] = {"setterm", "profile"};
 static const char * const path_setterm_charset[] = {"setterm", "charset"};
 static const char * const path_setterm_keyboard[] = {"setterm", "keyboard"};
 static const char * const path_setterm_keymap[] = {"setterm", "keymap"};
+#if SOLAR_OS_PACKAGE_SERVICE_BLE
+static const char * const path_setterm_ble[] = {"setterm", "ble"};
+#endif
 static const char * const path_setterm_powerkey[] = {"setterm", "powerkey"};
 static const char * const path_setterm_key[] = {"setterm", "key"};
 static const char * const path_setterm_keyrate[] = {"setterm", "keyrate"};
@@ -1478,6 +1556,18 @@ static const char * const path_display[] = {"display"};
 static const char * const path_display_test[] = {"display", "test"};
 static const char * const path_display_mode[] = {"display", "mode"};
 static const char * const path_display_mode_target[] = {"display", "mode", SHELL_COMPLETION_ANY};
+static const char * const path_input[] = {"input"};
+static const char * const path_input_test[] = {"input", "test"};
+static const char * const path_input_calibrate[] = {"input", "calibrate"};
+static const char * const path_input_keyboard[] = {"input", "keyboard"};
+static const char * const path_input_touch[] = {"input", "touch"};
+static const char * const path_input_mouse[] = {"input", "mouse"};
+static const char * const path_input_joystick[] = {"input", "joystick"};
+static const char * const path_input_dpad[] = {"input", "dpad"};
+static const char * const path_input_buttons[] = {"input", "buttons"};
+static const char * const path_input_calibrate_source[] = {
+    "input", "calibrate", SHELL_COMPLETION_ANY,
+};
 #if SOLAR_OS_PACKAGE_APP_INBOX
 static const char * const path_inbox[] = {"inbox"};
 static const char * const path_inbox_list[] = {"inbox", "list"};
@@ -1698,6 +1788,21 @@ static const char * const path_meshcore_channel[] = {
 };
 static const char * const path_meshcore_channel_public[] = {
     "meshcore", "channel", "public"
+};
+static const char * const path_meshcore_stream[] = {
+    "meshcore", "stream"
+};
+static const char * const path_meshcore_stream_status[] = {
+    "meshcore", "stream", "status"
+};
+static const char * const path_meshcore_stream_create[] = {
+    "meshcore", "stream", "create"
+};
+static const char * const path_meshcore_stream_create_port[] = {
+    "meshcore", "stream", "create", SHELL_COMPLETION_ANY
+};
+static const char * const path_meshcore_stream_remove[] = {
+    "meshcore", "stream", "remove"
 };
 #endif
 static const char * const path_job_start_slip[] = {"job", "start", "slip"};
@@ -2000,8 +2105,6 @@ static const char * const path_adc[] = {"adc"};
 static const char * const path_adc_read[] = {"adc", "read"};
 static const char * const path_dpad[] = {"dpad"};
 static const char * const path_dpad_calibrate[] = {"dpad", "calibrate"};
-static const char * const path_joystick[] = {"joystick"};
-static const char * const path_joystick_calibrate[] = {"joystick", "calibrate"};
 static const char * const path_pwm[] = {"pwm"};
 static const char * const path_pwm_set[] = {"pwm", "set"};
 static const char * const path_pwm_set_pin[] = {"pwm", "set", SHELL_COMPLETION_ANY};
@@ -2023,6 +2126,7 @@ static const char * const path_expansion_attach[] = {"expansion", "attach"};
 static const char * const path_expansion_detach[] = {"expansion", "detach"};
 #if SOLAR_OS_PACKAGE_JOB_MIDI
 static const char * const path_midi[] = {"midi"};
+static const char * const path_midi_stream[] = {"midi", "stream"};
 #endif
 #if SOLAR_OS_PACKAGE_SERVICE_CONTROLS
 static const char * const path_control[] = {"control"};
@@ -2040,6 +2144,18 @@ static const char * const path_control_get[] = {"control", "get"};
 static const char * const path_control_set[] = {"control", "set"};
 static const char * const path_control_unbind[] = {"control", "unbind"};
 static const char * const path_control_parameter[] = {"control", "parameter"};
+#endif
+#if SOLAR_OS_PACKAGE_SERVICE_OSC
+static const char * const path_osc[] = {"osc"};
+static const char * const path_osc_bind_type[] = {
+    "osc", "bind", SHELL_COMPLETION_ANY
+};
+static const char * const path_osc_bind_stream[] = {
+    "osc", "bind", SHELL_COMPLETION_ANY, "stream"
+};
+static const char * const path_osc_bind_control[] = {
+    "osc", "bind", SHELL_COMPLETION_ANY, "control"
+};
 #endif
 #if SOLAR_OS_PACKAGE_EXPANSION_NEOPIXEL
 static const char * const path_neopixel[] = {"neopixel"};
@@ -2155,79 +2271,79 @@ static const char * const path_ota_boot[] = {"ota", "boot"};
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_commands = true, \
+        .source = SHELL_COMPLETION_SOURCE_COMMANDS, \
     }
 #define SHELL_COMPLETION_APPS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_apps = true, \
+        .source = SHELL_COMPLETION_SOURCE_APPS, \
     }
 #define SHELL_COMPLETION_JOBS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_jobs = true, \
+        .source = SHELL_COMPLETION_SOURCE_JOBS, \
     }
 #define SHELL_COMPLETION_AGENT_CONVERSATIONS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_agent_conversations = true, \
+        .source = SHELL_COMPLETION_SOURCE_AGENT_CONVERSATIONS, \
     }
 #define SHELL_COMPLETION_INBOX_IDS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_inbox_ids = true, \
+        .source = SHELL_COMPLETION_SOURCE_INBOX_IDS, \
     }
 #define SHELL_COMPLETION_MESSAGE_IDS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_message_ids = true, \
+        .source = SHELL_COMPLETION_SOURCE_MESSAGE_IDS, \
     }
 #define SHELL_COMPLETION_CONTACT_IDS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_contact_ids = true, \
+        .source = SHELL_COMPLETION_SOURCE_CONTACT_IDS, \
     }
 #define SHELL_COMPLETION_ENDPOINT_IDS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_endpoint_ids = true, \
+        .source = SHELL_COMPLETION_SOURCE_ENDPOINT_IDS, \
     }
 #define SHELL_COMPLETION_PLAYGROUND_APPS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_playground_apps = true, \
+        .source = SHELL_COMPLETION_SOURCE_PLAYGROUND_APPS, \
     }
 #define SHELL_COMPLETION_AUDIO_OUTPUTS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_audio_outputs = true, \
+        .source = SHELL_COMPLETION_SOURCE_AUDIO_OUTPUTS, \
     }
 #define SHELL_COMPLETION_EXPANSION_DRIVERS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_expansion_drivers = true, \
+        .source = SHELL_COMPLETION_SOURCE_EXPANSION_DRIVERS, \
     }
 #define SHELL_COMPLETION_EXPANSION_DEVICES(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_expansion_devices = true, \
+        .source = SHELL_COMPLETION_SOURCE_EXPANSION_DEVICES, \
     }
 #define SHELL_COMPLETION_CONNECTORS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_connectors = true, \
+        .source = SHELL_COMPLETION_SOURCE_CONNECTORS, \
     }
 #define SHELL_COMPLETION_MANUAL(path_array, value_array) \
     { \
@@ -2235,202 +2351,215 @@ static const char * const path_ota_boot[] = {"ota", "boot"};
         .path_count = SHELL_ARRAY_COUNT(path_array), \
         .values = value_array, \
         .value_count = SHELL_ARRAY_COUNT(value_array), \
-        .complete_manual_pages = true, \
+        .source = SHELL_COMPLETION_SOURCE_MANUAL_PAGES, \
     }
 #define SHELL_COMPLETION_MANUAL_REFERENCES(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
         .required_prefix = "man:", \
-        .complete_manual_references = true, \
+        .source = SHELL_COMPLETION_SOURCE_MANUAL_REFERENCES, \
     }
 #define SHELL_COMPLETION_DISPLAY_SESSION_IDS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_display_session_ids = true, \
+        .source = SHELL_COMPLETION_SOURCE_DISPLAY_SESSION_IDS, \
     }
 #define SHELL_COMPLETION_SESSION_IDS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_session_ids = true, \
+        .source = SHELL_COMPLETION_SOURCE_SESSION_IDS, \
     }
 #define SHELL_COMPLETION_PORTS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_ports = true, \
+        .source = SHELL_COMPLETION_SOURCE_PORTS, \
     }
 #define SHELL_COMPLETION_RADIOS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_radios = true, \
+        .source = SHELL_COMPLETION_SOURCE_RADIOS, \
     }
 #define SHELL_COMPLETION_LINKS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_links = true, \
+        .source = SHELL_COMPLETION_SOURCE_LINKS, \
     }
 #define SHELL_COMPLETION_LINK_STREAMS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_link_streams = true, \
+        .source = SHELL_COMPLETION_SOURCE_LINK_STREAMS, \
+    }
+#define SHELL_COMPLETION_MESHCORE_STREAMS(path_array) \
+    { \
+        .path = path_array, \
+        .path_count = SHELL_ARRAY_COUNT(path_array), \
+        .source = SHELL_COMPLETION_SOURCE_MESHCORE_STREAMS, \
     }
 #define SHELL_COMPLETION_RADIO_PROFILES(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_radio_profiles = true, \
+        .source = SHELL_COMPLETION_SOURCE_RADIO_PROFILES, \
     }
 #define SHELL_COMPLETION_USER_RADIO_PROFILES(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_user_radio_profiles = true, \
+        .source = SHELL_COMPLETION_SOURCE_USER_RADIO_PROFILES, \
     }
 #define SHELL_COMPLETION_RAMFS_MOUNTS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_ramfs_mounts = true, \
+        .source = SHELL_COMPLETION_SOURCE_RAMFS_MOUNTS, \
     }
 #define SHELL_COMPLETION_STORAGE_MOUNTABLES(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_storage_mountables = true, \
+        .source = SHELL_COMPLETION_SOURCE_STORAGE_MOUNTABLES, \
     }
 #define SHELL_COMPLETION_STORAGE_BLOCKS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_storage_blocks = true, \
+        .source = SHELL_COMPLETION_SOURCE_STORAGE_BLOCKS, \
     }
 #define SHELL_COMPLETION_STORAGE_UNMOUNT_TARGETS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_storage_unmount_targets = true, \
+        .source = SHELL_COMPLETION_SOURCE_STORAGE_UNMOUNT_TARGETS, \
     }
 #define SHELL_COMPLETION_DISPLAY_TARGETS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_display_targets = true, \
+        .source = SHELL_COMPLETION_SOURCE_DISPLAY_TARGETS, \
     }
 #define SHELL_COMPLETION_DISPLAY_MODES(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_display_modes = true, \
+        .source = SHELL_COMPLETION_SOURCE_DISPLAY_MODES, \
+    }
+#define SHELL_COMPLETION_INPUT_SOURCES(path_array, absolute_only) \
+    { \
+        .path = path_array, \
+        .path_count = SHELL_ARRAY_COUNT(path_array), \
+        .source = SHELL_COMPLETION_SOURCE_INPUT_SOURCES, \
+        .flags = (absolute_only) ? SHELL_COMPLETION_FLAG_ABSOLUTE_POINTERS : 0U, \
     }
 #define SHELL_COMPLETION_GPIO_PINS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_gpio_pins = true, \
+        .source = SHELL_COMPLETION_SOURCE_GPIO_PINS, \
     }
 #define SHELL_COMPLETION_I2C_ARGUMENTS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_i2c_arguments = true, \
+        .source = SHELL_COMPLETION_SOURCE_I2C_ARGUMENTS, \
     }
 #define SHELL_COMPLETION_ONEWIRE_BUSES(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_onewire_buses = true, \
+        .source = SHELL_COMPLETION_SOURCE_ONEWIRE_BUSES, \
     }
 #define SHELL_COMPLETION_SPI_BUSES(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_spi_buses = true, \
+        .source = SHELL_COMPLETION_SOURCE_SPI_BUSES, \
     }
 #define SHELL_COMPLETION_UART_BUSES(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_uart_buses = true, \
+        .source = SHELL_COMPLETION_SOURCE_UART_BUSES, \
     }
 #define SHELL_COMPLETION_COM_ARGUMENTS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_com_arguments = true, \
+        .source = SHELL_COMPLETION_SOURCE_COM_ARGUMENTS, \
     }
 #define SHELL_COMPLETION_UART_ARGUMENTS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_uart_arguments = true, \
+        .source = SHELL_COMPLETION_SOURCE_UART_ARGUMENTS, \
     }
 #define SHELL_COMPLETION_BUSES(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_buses = true, \
+        .source = SHELL_COMPLETION_SOURCE_BUSES, \
     }
 #define SHELL_COMPLETION_PS2_BUSES(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_ps2_buses = true, \
+        .source = SHELL_COMPLETION_SOURCE_PS2_BUSES, \
     }
 #define SHELL_COMPLETION_MIDI_BUSES(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_midi_buses = true, \
+        .source = SHELL_COMPLETION_SOURCE_MIDI_BUSES, \
     }
 #define SHELL_COMPLETION_SPI_CS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_spi_cs = true, \
+        .source = SHELL_COMPLETION_SOURCE_SPI_CS, \
     }
 #define SHELL_COMPLETION_STREAMS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_streams = true, \
+        .source = SHELL_COMPLETION_SOURCE_STREAMS, \
     }
 #define SHELL_COMPLETION_SCALAR_STREAMS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_streams = true, \
-        .scalar_streams_only = true, \
+        .source = SHELL_COMPLETION_SOURCE_STREAMS, \
+        .flags = SHELL_COMPLETION_FLAG_SCALAR_STREAMS, \
     }
 #define SHELL_COMPLETION_CONTROLS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_controls = true, \
+        .source = SHELL_COMPLETION_SOURCE_CONTROLS, \
     }
 #define SHELL_COMPLETION_PARAMETERS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_parameters = true, \
+        .source = SHELL_COMPLETION_SOURCE_PARAMETERS, \
     }
 #define SHELL_COMPLETION_WIFI_SSIDS(path_array) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_wifi_ssids = true, \
+        .source = SHELL_COMPLETION_SOURCE_WIFI_SSIDS, \
     }
 #define SHELL_COMPLETION_PATH(path_array, only_dirs) \
     { \
         .path = path_array, \
         .path_count = SHELL_ARRAY_COUNT(path_array), \
-        .complete_path = true, \
-        .dirs_only = only_dirs, \
+        .flags = SHELL_COMPLETION_FLAG_PATH | \
+            ((only_dirs) ? SHELL_COMPLETION_FLAG_DIRS_ONLY : 0U), \
     }
 
 static const shell_completion_rule_t shell_completion_rules[] = {
@@ -2445,6 +2574,7 @@ static const shell_completion_rule_t shell_completion_rules[] = {
 #if SOLAR_OS_PACKAGE_APP_ARECORD
     SHELL_COMPLETION_OPTIONS(path_arecord, arecord_options),
     SHELL_COMPLETION_STATIC(path_arecord_duration, arecord_duration_values),
+    SHELL_COMPLETION_STREAMS(path_arecord_input),
 #endif
 #if SOLAR_OS_PACKAGE_APP_RECORDER
     SHELL_COMPLETION_OPTIONS(path_recorder, recorder_options),
@@ -2544,6 +2674,13 @@ static const shell_completion_rule_t shell_completion_rules[] = {
     SHELL_COMPLETION_COMMANDS(path_watch),
     SHELL_COMPLETION_COMMANDS(path_watch_n_interval),
     SHELL_COMPLETION_STATIC(path_setterm, setterm_subcommands),
+    SHELL_COMPLETION_DISPLAY_TARGETS(path_setterm_display),
+    SHELL_COMPLETION_STATIC(path_setterm_display_target, setterm_display_settings),
+    SHELL_COMPLETION_STATIC(path_setterm_display_orientation, setterm_orientation_values),
+    SHELL_COMPLETION_STATIC(path_setterm_display_font, setterm_font_values),
+    SHELL_COMPLETION_STATIC(path_setterm_display_textsize, setterm_textsize_values),
+    SHELL_COMPLETION_STATIC(path_setterm_display_palette, setterm_palette_values),
+    SHELL_COMPLETION_STATIC(path_setterm_display_statusbar, setterm_statusbar_values),
     SHELL_COMPLETION_STATIC(path_setterm_orientation, setterm_orientation_values),
     SHELL_COMPLETION_STATIC(path_setterm_font, setterm_font_values),
     SHELL_COMPLETION_STATIC(path_setterm_textsize, setterm_textsize_values),
@@ -2555,6 +2692,9 @@ static const shell_completion_rule_t shell_completion_rules[] = {
     SHELL_COMPLETION_STATIC(path_setterm_charset, setterm_charset_values),
     SHELL_COMPLETION_STATIC(path_setterm_keyboard, setterm_keyboard_values),
     SHELL_COMPLETION_STATIC(path_setterm_keymap, setterm_keyboard_values),
+#if SOLAR_OS_PACKAGE_SERVICE_BLE
+    SHELL_COMPLETION_STATIC(path_setterm_ble, setterm_ble_values),
+#endif
     SHELL_COMPLETION_STATIC(path_setterm_powerkey, setterm_powerkey_values),
     SHELL_COMPLETION_STATIC(path_setterm_key, setterm_powerkey_values),
     SHELL_COMPLETION_STATIC(path_setterm_keyrate, setterm_keyrate_values),
@@ -2563,6 +2703,16 @@ static const shell_completion_rule_t shell_completion_rules[] = {
     SHELL_COMPLETION_STATIC(path_setterm_timezone, setterm_timezone_values),
     SHELL_COMPLETION_STATIC(path_setterm_startup, setterm_startup_values),
     SHELL_COMPLETION_STATIC(path_display, display_subcommands),
+    SHELL_COMPLETION_STATIC(path_input, input_subcommands),
+    SHELL_COMPLETION_INPUT_SOURCES(path_input_test, false),
+    SHELL_COMPLETION_INPUT_SOURCES(path_input_calibrate, true),
+    SHELL_COMPLETION_STATIC(path_input_keyboard, input_class_subcommands),
+    SHELL_COMPLETION_STATIC(path_input_touch, input_class_subcommands),
+    SHELL_COMPLETION_STATIC(path_input_mouse, input_class_subcommands),
+    SHELL_COMPLETION_STATIC(path_input_joystick, input_class_subcommands),
+    SHELL_COMPLETION_STATIC(path_input_dpad, input_class_subcommands),
+    SHELL_COMPLETION_STATIC(path_input_buttons, input_class_subcommands),
+    SHELL_COMPLETION_STATIC(path_input_calibrate_source, input_calibration_subcommands),
     SHELL_COMPLETION_DISPLAY_TARGETS(path_display_test),
     SHELL_COMPLETION_DISPLAY_TARGETS(path_display_mode),
     SHELL_COMPLETION_DISPLAY_MODES(path_display_mode_target),
@@ -2658,6 +2808,13 @@ static const shell_completion_rule_t shell_completion_rules[] = {
                             meshcore_channel_subcommands),
     SHELL_COMPLETION_STATIC(path_meshcore_channel_public,
                             meshcore_on_off_values),
+    SHELL_COMPLETION_STATIC(path_meshcore_stream,
+                            meshcore_stream_subcommands),
+    SHELL_COMPLETION_MESHCORE_STREAMS(path_meshcore_stream_status),
+    SHELL_COMPLETION_STATIC(path_meshcore_stream_create,
+                            meshcore_stream_port_values),
+    SHELL_COMPLETION_ENDPOINT_IDS(path_meshcore_stream_create_port),
+    SHELL_COMPLETION_MESHCORE_STREAMS(path_meshcore_stream_remove),
 #endif
     SHELL_COMPLETION_PORTS(path_job_start_slip),
 #if SOLAR_OS_PACKAGE_JOB_SLIP
@@ -2860,8 +3017,6 @@ static const shell_completion_rule_t shell_completion_rules[] = {
     SHELL_COMPLETION_GPIO_PINS(path_adc_read),
     SHELL_COMPLETION_STATIC(path_dpad, dpad_subcommands),
     SHELL_COMPLETION_STATIC(path_dpad_calibrate, dpad_calibrate_subcommands),
-    SHELL_COMPLETION_STATIC(path_joystick, joystick_subcommands),
-    SHELL_COMPLETION_STATIC(path_joystick_calibrate, joystick_calibrate_subcommands),
     SHELL_COMPLETION_STATIC(path_pwm, pwm_subcommands),
     SHELL_COMPLETION_GPIO_PINS(path_pwm_set),
     SHELL_COMPLETION_STATIC(path_pwm_set_pin, pwm_freq_values),
@@ -2880,6 +3035,7 @@ static const shell_completion_rule_t shell_completion_rules[] = {
 #endif
 #if SOLAR_OS_PACKAGE_JOB_MIDI
     SHELL_COMPLETION_STATIC(path_midi, midi_subcommands),
+    SHELL_COMPLETION_STATIC(path_midi_stream, midi_stream_subcommands),
 #endif
 #if SOLAR_OS_PACKAGE_SERVICE_CONTROLS
     SHELL_COMPLETION_STATIC(path_control, control_subcommands),
@@ -2893,6 +3049,12 @@ static const shell_completion_rule_t shell_completion_rules[] = {
     SHELL_COMPLETION_CONTROLS(path_control_unbind),
     SHELL_COMPLETION_STATIC(path_control_parameter,
                             control_parameter_subcommands),
+#endif
+#if SOLAR_OS_PACKAGE_SERVICE_OSC
+    SHELL_COMPLETION_STATIC(path_osc, osc_subcommands),
+    SHELL_COMPLETION_STATIC(path_osc_bind_type, osc_source_types),
+    SHELL_COMPLETION_STREAMS(path_osc_bind_stream),
+    SHELL_COMPLETION_CONTROLS(path_osc_bind_control),
 #endif
 #if SOLAR_OS_PACKAGE_EXPANSION_NEOPIXEL
     SHELL_COMPLETION_STATIC(path_neopixel, neopixel_subcommands),
@@ -2973,6 +3135,89 @@ static const shell_completion_rule_t shell_completion_rules[] = {
     SHELL_COMPLETION_STATIC(path_ota_boot, ota_boot_values),
 };
 
+#define SHELL_COMPLETION_INDEX_BUCKETS 128U
+#define SHELL_COMPLETION_RULE_NONE UINT16_MAX
+
+typedef struct {
+    uint16_t heads[SHELL_COMPLETION_INDEX_BUCKETS];
+    uint16_t next[SHELL_ARRAY_COUNT(shell_completion_rules)];
+    bool ready;
+} shell_completion_index_t;
+
+SOLAR_OS_APP_STATIC_SRAM_EXCEPTION("shared shell completion command index")
+static shell_completion_index_t shell_completion_index;
+SOLAR_OS_APP_STATIC_SRAM_EXCEPTION("shell completion index initialization lock")
+static portMUX_TYPE shell_completion_index_lock = portMUX_INITIALIZER_UNLOCKED;
+
+_Static_assert(SHELL_ARRAY_COUNT(shell_completion_rules) < UINT16_MAX,
+               "shell completion rule index exceeds uint16_t");
+
+static uint32_t shell_completion_command_hash(const char *command)
+{
+    uint32_t hash = 2166136261U;
+    if (command == NULL) {
+        return hash;
+    }
+    for (const unsigned char *p = (const unsigned char *)command;
+         *p != '\0';
+         p++) {
+        hash ^= *p;
+        hash *= 16777619U;
+    }
+    return hash;
+}
+
+static void shell_completion_index_init(void)
+{
+    portENTER_CRITICAL(&shell_completion_index_lock);
+    if (!shell_completion_index.ready) {
+        for (size_t i = 0U; i < SHELL_COMPLETION_INDEX_BUCKETS; i++) {
+            shell_completion_index.heads[i] = SHELL_COMPLETION_RULE_NONE;
+        }
+        for (size_t remaining = SHELL_ARRAY_COUNT(shell_completion_rules);
+             remaining > 0U;
+             remaining--) {
+            const size_t i = remaining - 1U;
+            const char *command = shell_completion_rules[i].path[0];
+            const size_t bucket =
+                shell_completion_command_hash(command) % SHELL_COMPLETION_INDEX_BUCKETS;
+            shell_completion_index.next[i] = shell_completion_index.heads[bucket];
+            shell_completion_index.heads[bucket] = (uint16_t)i;
+        }
+        shell_completion_index.ready = true;
+    }
+    portEXIT_CRITICAL(&shell_completion_index_lock);
+}
+
+static uint16_t shell_completion_rule_first(const char *command)
+{
+    if (command == NULL || command[0] == '\0') {
+        return SHELL_COMPLETION_RULE_NONE;
+    }
+    shell_completion_index_init();
+    const size_t bucket =
+        shell_completion_command_hash(command) % SHELL_COMPLETION_INDEX_BUCKETS;
+    uint16_t index = shell_completion_index.heads[bucket];
+    while (index != SHELL_COMPLETION_RULE_NONE &&
+           strcmp(shell_completion_rules[index].path[0], command) != 0) {
+        index = shell_completion_index.next[index];
+    }
+    return index;
+}
+
+static uint16_t shell_completion_rule_next(uint16_t index, const char *command)
+{
+    if (index == SHELL_COMPLETION_RULE_NONE) {
+        return index;
+    }
+    index = shell_completion_index.next[index];
+    while (index != SHELL_COMPLETION_RULE_NONE &&
+           strcmp(shell_completion_rules[index].path[0], command) != 0) {
+        index = shell_completion_index.next[index];
+    }
+    return index;
+}
+
 #undef SHELL_COMPLETION_PATH
 #undef SHELL_COMPLETION_WIFI_SSIDS
 #undef SHELL_COMPLETION_PORTS
@@ -2980,6 +3225,7 @@ static const shell_completion_rule_t shell_completion_rules[] = {
 #undef SHELL_COMPLETION_RAMFS_MOUNTS
 #undef SHELL_COMPLETION_DISPLAY_MODES
 #undef SHELL_COMPLETION_DISPLAY_TARGETS
+#undef SHELL_COMPLETION_INPUT_SOURCES
 #undef SHELL_COMPLETION_GPIO_PINS
 #undef SHELL_COMPLETION_STREAMS
 #undef SHELL_COMPLETION_SCALAR_STREAMS
@@ -3037,6 +3283,50 @@ static void cmd_commands(solar_os_context_t *ctx, int argc, char **argv)
         solar_os_shell_io_write_bold(io, shell_builtin_commands[i].name);
         solar_os_shell_io_printf(io, " - %s\n", shell_builtin_commands[i].summary);
     }
+}
+
+static void cmd_echo(solar_os_context_t *ctx, int argc, char **argv)
+{
+    solar_os_shell_io_t *io = shell_io(ctx);
+
+    for (int i = 1; i < argc; i++) {
+        if (i > 1) {
+            solar_os_shell_io_write(io, " ");
+        }
+        solar_os_shell_io_write(io, argv[i]);
+    }
+    solar_os_shell_io_newline(io);
+}
+
+static void cmd_wait(solar_os_context_t *ctx, int argc, char **argv)
+{
+    solar_os_shell_io_t *io = shell_io(ctx);
+
+    if (argc != 2) {
+        if (argc < 2) {
+            solar_os_shell_diag_missing(io, "wait", "seconds", "wait <seconds>");
+        } else {
+            solar_os_shell_diag_unexpected(io, "wait", argv[2], "wait <seconds>");
+        }
+        return;
+    }
+
+    char *end = NULL;
+    errno = 0;
+    const unsigned long seconds = strtoul(argv[1], &end, 10);
+    if (errno != 0 || end == argv[1] || *end != '\0' ||
+        seconds > SHELL_WAIT_MAX_SECONDS) {
+        solar_os_shell_diag_invalid(io,
+                                    "wait",
+                                    "seconds",
+                                    argv[1],
+                                    "0 through 86400",
+                                    "wait <seconds>",
+                                    false);
+        return;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS((uint32_t)seconds * 1000U));
 }
 
 static solar_os_shell_io_t *terminal(solar_os_context_t *ctx)
@@ -3181,7 +3471,19 @@ static void shell_prompt(solar_os_context_t *ctx)
     shell_session(ctx)->prompt_on_resume = false;
     shell_session(ctx)->clear_on_resume = false;
 
-    if (solar_os_shell_io_cursor_col(io) != 0) {
+    int exit_code = 0;
+    if (solar_os_context_take_exit_result(ctx, &exit_code)) {
+        shell_session(ctx)->last_exit_code = exit_code;
+    }
+
+    if (shell_session(ctx)->exit_message_pending) {
+        if (solar_os_shell_io_cursor_col(io) != 0) {
+            solar_os_shell_io_newline(io);
+        }
+        solar_os_shell_io_writeln(io, shell_session(ctx)->exit_message);
+        shell_session(ctx)->exit_message_pending = false;
+        shell_session(ctx)->exit_message[0] = '\0';
+    } else if (solar_os_shell_io_cursor_col(io) != 0) {
         solar_os_shell_io_newline(io);
     }
 
@@ -4012,12 +4314,12 @@ static bool shell_alias_expand_callback(const char *name, int argc, char **argv,
     return false;
 }
 
-static bool shell_try_alias(solar_os_context_t *ctx,
-                            int argc,
-                            char **argv,
-                            const char *source,
-                            size_t line_number,
-                            bool *matched)
+static bool SHELL_NOINLINE shell_try_alias(solar_os_context_t *ctx,
+                                           int argc,
+                                           char **argv,
+                                           const char *source,
+                                           size_t line_number,
+                                           bool *matched)
 {
     solar_os_shell_io_t *term = terminal(ctx);
     shell_alias_expand_t expand = {
@@ -4800,16 +5102,11 @@ static shell_path_completion_work_t *shell_alloc_path_completion_work(void)
 
 static void shell_update_common_prefix(char *common, size_t common_len, const char *name)
 {
-    size_t i = 0;
-
     if (common == NULL || common_len == 0 || name == NULL) {
         return;
     }
-
-    while (common[i] != '\0' && name[i] != '\0' && common[i] == name[i]) {
-        i++;
-    }
-    common[i] = '\0';
+    const size_t length = solar_os_shell_completion_common_prefix(common, name);
+    common[length < common_len ? length : common_len - 1U] = '\0';
 }
 
 static bool shell_path_entry_matches(const char *name, const char *prefix, bool prefix_has_wildcards)
@@ -5025,7 +5322,13 @@ static void shell_completion_emit(shell_completion_match_t *state, const char *v
         return;
     }
 
-    strlcpy(state->match, value, sizeof(state->match));
+    if (state->count == 0U) {
+        strlcpy(state->match, value, sizeof(state->match));
+    } else {
+        const size_t common =
+            solar_os_shell_completion_common_prefix(state->match, value);
+        state->match[common] = '\0';
+    }
     state->count++;
     if (state->print) {
         solar_os_shell_io_writeln(state->io, value);
@@ -5425,6 +5728,21 @@ static void shell_completion_emit_link_streams(shell_completion_match_t *state)
 #endif
 }
 
+static void shell_completion_emit_meshcore_streams(shell_completion_match_t *state)
+{
+#if SOLAR_OS_PACKAGE_JOB_MESHCORE
+    const size_t count = solar_os_meshcore_stream_count();
+    for (size_t i = 0; i < count; i++) {
+        solar_os_meshcore_stream_status_t status;
+        if (solar_os_meshcore_stream_get(i, &status)) {
+            shell_completion_emit(state, status.stream.port);
+        }
+    }
+#else
+    (void)state;
+#endif
+}
+
 static void shell_completion_emit_radio_profiles(shell_completion_match_t *state,
                                                  bool user_only)
 {
@@ -5508,6 +5826,21 @@ static void shell_completion_emit_display_targets(shell_completion_match_t *stat
         solar_os_display_target_t target;
         if (solar_os_display_get_target(i, &target)) {
             shell_completion_emit(state, target.name);
+        }
+    }
+}
+
+static void shell_completion_emit_input_sources(shell_completion_match_t *state,
+                                                bool absolute_only)
+{
+    const size_t count = solar_os_input_source_count();
+
+    for (size_t i = 0; i < count; i++) {
+        solar_os_input_source_info_t info;
+        if (solar_os_input_source_get(i, &info) &&
+            (!absolute_only ||
+             (info.capabilities & SOLAR_OS_INPUT_CAP_POINTER_ABSOLUTE) != 0U)) {
+            shell_completion_emit(state, info.name);
         }
     }
 }
@@ -6080,6 +6413,137 @@ static void shell_completion_init_state(solar_os_context_t *ctx,
     state->print = print;
 }
 
+#if SOLAR_OS_PACKAGE_APP_SSH || SOLAR_OS_PACKAGE_APP_SCP
+typedef struct {
+    shell_completion_match_t *matches;
+    const char *authority_prefix;
+    size_t authority_prefix_len;
+} shell_ssh_host_completion_t;
+
+static bool shell_completion_visit_ssh_host(const char *address,
+                                            const char *alias,
+                                            void *user)
+{
+    shell_ssh_host_completion_t *completion = (shell_ssh_host_completion_t *)user;
+    char candidate[SHELL_INPUT_MAX];
+
+    (void)address;
+    const int written = snprintf(candidate,
+                                 sizeof(candidate),
+                                 "%.*s%s",
+                                 (int)completion->authority_prefix_len,
+                                 completion->authority_prefix,
+                                 alias);
+    if (written >= 0 && (size_t)written < sizeof(candidate)) {
+        shell_completion_emit(completion->matches, candidate);
+    }
+    return true;
+}
+
+static bool shell_scp_host_position(const char * const *tokens, size_t token_count)
+{
+    size_t positional_count = 0U;
+
+    for (size_t i = 1U; i < token_count; i++) {
+        if (strcmp(tokens[i], "-P") == 0) {
+            if (i + 1U >= token_count) {
+                return false;
+            }
+            i++;
+            continue;
+        }
+        positional_count++;
+    }
+    return positional_count < 2U;
+}
+
+static bool SHELL_NOINLINE shell_complete_ssh_host_argument(
+    solar_os_context_t *ctx,
+    const char *effective_command,
+    const char * const *tokens,
+    size_t token_count,
+    const char *prefix,
+    size_t token_start,
+    bool show_matches)
+{
+    const bool ssh_command =
+#if SOLAR_OS_PACKAGE_APP_SSH
+        strcmp(effective_command, "ssh") == 0;
+#else
+        false;
+#endif
+    const bool scp_command =
+#if SOLAR_OS_PACKAGE_APP_SCP
+        strcmp(effective_command, "scp") == 0;
+#else
+        false;
+#endif
+    if ((!ssh_command && !scp_command) || prefix == NULL) {
+        return false;
+    }
+    if ((ssh_command && token_count != 1U) ||
+        (scp_command && !shell_scp_host_position(tokens, token_count))) {
+        return false;
+    }
+    if (prefix[0] == '-' || strchr(prefix, ':') != NULL ||
+        strchr(prefix, '/') != NULL || prefix[0] == '.') {
+        return false;
+    }
+
+    const char *at = strchr(prefix, '@');
+    if (at == prefix) {
+        return false;
+    }
+    shell_completion_match_t matches;
+    shell_completion_init_state(ctx, prefix, false, &matches);
+    shell_ssh_host_completion_t completion = {
+        .matches = &matches,
+        .authority_prefix = prefix,
+        .authority_prefix_len = at != NULL ? (size_t)(at - prefix) + 1U : 0U,
+    };
+    if (solar_os_ssh_hosts_visit(shell_completion_visit_ssh_host, &completion) != ESP_OK ||
+        matches.count == 0U) {
+        return false;
+    }
+
+    shell_session(ctx)->history_browsing = false;
+    shell_session(ctx)->history_index = -1;
+    if (matches.count == 1U && !show_matches) {
+        char completed[SHELL_INPUT_MAX];
+        snprintf(completed,
+                 sizeof(completed),
+                 "%.*s%s%s",
+                 (int)token_start,
+                 shell_session(ctx)->input,
+                 matches.match,
+                 scp_command ? ":" : " ");
+        shell_replace_input(ctx, completed);
+        return true;
+    }
+    if (!show_matches && strlen(matches.match) > strlen(prefix)) {
+        char completed[SHELL_INPUT_MAX];
+        snprintf(completed,
+                 sizeof(completed),
+                 "%.*s%s",
+                 (int)token_start,
+                 shell_session(ctx)->input,
+                 matches.match);
+        shell_replace_input(ctx, completed);
+        return true;
+    }
+    if (show_matches) {
+        char original[SHELL_INPUT_MAX];
+        strlcpy(original, shell_session(ctx)->input, sizeof(original));
+        solar_os_shell_io_newline(shell_io(ctx));
+        shell_completion_init_state(ctx, prefix, true, &matches);
+        (void)solar_os_ssh_hosts_visit(shell_completion_visit_ssh_host, &completion);
+        shell_prompt(ctx);
+        shell_replace_input(ctx, original);
+    }
+    return true;
+}
+#endif
+
 #if SOLAR_OS_PACKAGE_SERVICE_OTA
 static void shell_completion_emit_ota_flavors(shell_completion_match_t *state)
 {
@@ -6378,6 +6842,18 @@ static bool shell_complete_daq_kind(solar_os_context_t *ctx,
         return true;
     }
 
+    if (!show_matches && strlen(state.match) > strlen(prefix)) {
+        char completed[SHELL_INPUT_MAX];
+        snprintf(completed,
+                 sizeof(completed),
+                 "%.*s%s",
+                 (int)token_start,
+                 shell_session(ctx)->input,
+                 state.match);
+        shell_replace_input(ctx, completed);
+        return true;
+    }
+
     if (show_matches) {
         char original[SHELL_INPUT_MAX];
         strlcpy(original, shell_session(ctx)->input, sizeof(original));
@@ -6583,12 +7059,19 @@ static const solar_os_expansion_binding_spec_t shell_manual_expansion_specs[] = 
     {.key = "spi", .kind = SOLAR_OS_EXPANSION_BINDING_SPI_BUS},
     {.key = "cs", .kind = SOLAR_OS_EXPANSION_BINDING_SPI_CS},
     {.key = "uart", .kind = SOLAR_OS_EXPANSION_BINDING_UART_PORT},
+    {.key = "ps2", .kind = SOLAR_OS_EXPANSION_BINDING_PS2_BUS},
+    {.key = "x", .kind = SOLAR_OS_EXPANSION_BINDING_SCALAR_STREAM, .role = "x"},
+    {.key = "y", .kind = SOLAR_OS_EXPANSION_BINDING_SCALAR_STREAM, .role = "y"},
     {.key = "addr", .kind = SOLAR_OS_EXPANSION_BINDING_I2C_ADDRESS},
     {.key = "gpio", .kind = SOLAR_OS_EXPANSION_BINDING_GPIO, .role = "gpio"},
     {.key = "irq", .kind = SOLAR_OS_EXPANSION_BINDING_GPIO, .role = "irq"},
     {.key = "reset", .kind = SOLAR_OS_EXPANSION_BINDING_GPIO, .role = "reset"},
     {.key = "dc", .kind = SOLAR_OS_EXPANSION_BINDING_GPIO, .role = "dc"},
     {.key = "busy", .kind = SOLAR_OS_EXPANSION_BINDING_GPIO, .role = "busy"},
+    {.key = "min", .kind = SOLAR_OS_EXPANSION_BINDING_PARAMETER, .role = "min"},
+    {.key = "center", .kind = SOLAR_OS_EXPANSION_BINDING_PARAMETER, .role = "center"},
+    {.key = "max", .kind = SOLAR_OS_EXPANSION_BINDING_PARAMETER, .role = "max"},
+    {.key = "deadzone", .kind = SOLAR_OS_EXPANSION_BINDING_PARAMETER, .role = "deadzone"},
 };
 
 static bool shell_expansion_find_driver(const char *name,
@@ -6699,6 +7182,26 @@ static void shell_completion_emit_expansion_spec(
             solar_os_expansion_uart_port_t port;
             if (solar_os_expansion_get_uart_port(i, &port)) {
                 snprintf(candidate, sizeof(candidate), "%s=%s", spec->key, port.name);
+                shell_completion_emit(state, candidate);
+            }
+        }
+        break;
+    case SOLAR_OS_EXPANSION_BINDING_PS2_BUS:
+        for (size_t i = 0; i < solar_os_bus_count_protocol(SOLAR_OS_BUS_PROTOCOL_PS2); i++) {
+            solar_os_bus_info_t bus;
+            if (solar_os_bus_get_protocol(SOLAR_OS_BUS_PROTOCOL_PS2, i, &bus)) {
+                snprintf(candidate, sizeof(candidate), "%s=%s", spec->key, bus.name);
+                shell_completion_emit(state, candidate);
+            }
+        }
+        break;
+    case SOLAR_OS_EXPANSION_BINDING_SCALAR_STREAM:
+        for (size_t i = 0; i < solar_os_stream_count(); i++) {
+            solar_os_stream_info_t info;
+            if (solar_os_stream_get(i, &info) &&
+                info.type == SOLAR_OS_STREAM_TYPE_SCALAR &&
+                info.direction != SOLAR_OS_STREAM_DIRECTION_SINK) {
+                snprintf(candidate, sizeof(candidate), "%s=%s", spec->key, info.id);
                 shell_completion_emit(state, candidate);
             }
         }
@@ -6816,7 +7319,7 @@ static bool shell_completion_collect_matches(solar_os_context_t *ctx,
     bool rule_seen = false;
     size_t best_wildcards = SHELL_ARG_MAX + 1U;
 
-    if (state == NULL) {
+    if (state == NULL || tokens == NULL || token_count == 0U) {
         return false;
     }
 
@@ -6826,11 +7329,13 @@ static bool shell_completion_collect_matches(solar_os_context_t *ctx,
     state->prefix = prefix;
     state->print = print;
 
-    for (size_t i = 0; i < SHELL_ARRAY_COUNT(shell_completion_rules); i++) {
-        const shell_completion_rule_t *rule = &shell_completion_rules[i];
+    for (uint16_t rule_index = shell_completion_rule_first(tokens[0]);
+         rule_index != SHELL_COMPLETION_RULE_NONE;
+         rule_index = shell_completion_rule_next(rule_index, tokens[0])) {
+        const shell_completion_rule_t *rule = &shell_completion_rules[rule_index];
         size_t wildcards = 0;
 
-        if (rule->complete_path ||
+        if ((rule->flags & SHELL_COMPLETION_FLAG_PATH) != 0U ||
             !shell_completion_path_matches(rule, tokens, token_count, &wildcards)) {
             continue;
         }
@@ -6843,11 +7348,13 @@ static bool shell_completion_collect_matches(solar_os_context_t *ctx,
         }
     }
 
-    for (size_t i = 0; i < SHELL_ARRAY_COUNT(shell_completion_rules); i++) {
-        const shell_completion_rule_t *rule = &shell_completion_rules[i];
+    for (uint16_t rule_index = shell_completion_rule_first(tokens[0]);
+         rule_index != SHELL_COMPLETION_RULE_NONE;
+         rule_index = shell_completion_rule_next(rule_index, tokens[0])) {
+        const shell_completion_rule_t *rule = &shell_completion_rules[rule_index];
         size_t wildcards = 0;
 
-        if (rule->complete_path ||
+        if ((rule->flags & SHELL_COMPLETION_FLAG_PATH) != 0U ||
             !shell_completion_path_matches(rule, tokens, token_count, &wildcards) ||
             wildcards != best_wildcards) {
             continue;
@@ -6861,139 +7368,157 @@ static bool shell_completion_collect_matches(solar_os_context_t *ctx,
         for (size_t value_index = 0; value_index < rule->value_count; value_index++) {
             shell_completion_emit(state, rule->values[value_index]);
         }
-        if (rule->complete_commands) {
+        switch (rule->source) {
+        case SHELL_COMPLETION_SOURCE_NONE:
+            break;
+        case SHELL_COMPLETION_SOURCE_COMMANDS:
             shell_completion_emit_commands(state);
-        }
-        if (rule->complete_apps) {
+            break;
+        case SHELL_COMPLETION_SOURCE_APPS:
             shell_completion_emit_apps(state);
-        }
-        if (rule->complete_jobs) {
+            break;
+        case SHELL_COMPLETION_SOURCE_JOBS:
             shell_completion_emit_jobs(state);
-        }
-        if (rule->complete_agent_conversations) {
-            shell_completion_emit_agent_conversations(state);
-        }
-        if (rule->complete_inbox_ids) {
-            shell_completion_emit_inbox_ids(state);
-        }
-        if (rule->complete_message_ids) {
-            shell_completion_emit_message_ids(state);
-        }
-        if (rule->complete_contact_ids) {
-            shell_completion_emit_contact_ids(state);
-        }
-        if (rule->complete_endpoint_ids) {
-            shell_completion_emit_endpoint_ids(state);
-        }
-        if (rule->complete_playground_apps) {
-            shell_completion_emit_playground_apps(state);
-        }
-        if (rule->complete_audio_outputs) {
-            shell_completion_emit_audio_outputs(state);
-        }
-        if (rule->complete_expansion_drivers) {
-            shell_completion_emit_expansion_drivers(state);
-        }
-        if (rule->complete_expansion_devices) {
-            shell_completion_emit_expansion_devices(state);
-        }
-        if (rule->complete_connectors) {
-            shell_completion_emit_connectors(state);
-        }
-        if (rule->complete_manual_pages) {
+            break;
+        case SHELL_COMPLETION_SOURCE_MANUAL_PAGES:
             shell_completion_emit_manual_pages(state);
-        }
-        if (rule->complete_manual_references) {
+            break;
+        case SHELL_COMPLETION_SOURCE_MANUAL_REFERENCES:
             shell_completion_emit_manual_references(state);
-        }
-        if (rule->complete_display_session_ids) {
+            break;
+        case SHELL_COMPLETION_SOURCE_AGENT_CONVERSATIONS:
+            shell_completion_emit_agent_conversations(state);
+            break;
+        case SHELL_COMPLETION_SOURCE_INBOX_IDS:
+            shell_completion_emit_inbox_ids(state);
+            break;
+        case SHELL_COMPLETION_SOURCE_MESSAGE_IDS:
+            shell_completion_emit_message_ids(state);
+            break;
+        case SHELL_COMPLETION_SOURCE_CONTACT_IDS:
+            shell_completion_emit_contact_ids(state);
+            break;
+        case SHELL_COMPLETION_SOURCE_ENDPOINT_IDS:
+            shell_completion_emit_endpoint_ids(state);
+            break;
+        case SHELL_COMPLETION_SOURCE_PLAYGROUND_APPS:
+            shell_completion_emit_playground_apps(state);
+            break;
+        case SHELL_COMPLETION_SOURCE_AUDIO_OUTPUTS:
+            shell_completion_emit_audio_outputs(state);
+            break;
+        case SHELL_COMPLETION_SOURCE_EXPANSION_DRIVERS:
+            shell_completion_emit_expansion_drivers(state);
+            break;
+        case SHELL_COMPLETION_SOURCE_EXPANSION_DEVICES:
+            shell_completion_emit_expansion_devices(state);
+            break;
+        case SHELL_COMPLETION_SOURCE_CONNECTORS:
+            shell_completion_emit_connectors(state);
+            break;
+        case SHELL_COMPLETION_SOURCE_DISPLAY_SESSION_IDS:
             shell_completion_emit_display_session_ids(state);
-        }
-        if (rule->complete_session_ids) {
+            break;
+        case SHELL_COMPLETION_SOURCE_SESSION_IDS:
             shell_completion_emit_session_ids(state);
-        }
-        if (rule->complete_ports) {
+            break;
+        case SHELL_COMPLETION_SOURCE_PORTS:
             shell_completion_emit_ports(state);
-        }
-        if (rule->complete_radios) {
+            break;
+        case SHELL_COMPLETION_SOURCE_RADIOS:
             shell_completion_emit_radios(state);
-        }
-        if (rule->complete_links) {
+            break;
+        case SHELL_COMPLETION_SOURCE_LINKS:
             shell_completion_emit_links(state);
-        }
-        if (rule->complete_link_streams) {
+            break;
+        case SHELL_COMPLETION_SOURCE_LINK_STREAMS:
             shell_completion_emit_link_streams(state);
-        }
-        if (rule->complete_radio_profiles) {
+            break;
+        case SHELL_COMPLETION_SOURCE_MESHCORE_STREAMS:
+            shell_completion_emit_meshcore_streams(state);
+            break;
+        case SHELL_COMPLETION_SOURCE_RADIO_PROFILES:
             shell_completion_emit_radio_profiles(state, false);
-        }
-        if (rule->complete_user_radio_profiles) {
+            break;
+        case SHELL_COMPLETION_SOURCE_USER_RADIO_PROFILES:
             shell_completion_emit_radio_profiles(state, true);
-        }
-        if (rule->complete_ramfs_mounts) {
+            break;
+        case SHELL_COMPLETION_SOURCE_RAMFS_MOUNTS:
             shell_completion_emit_ramfs_mounts(state);
-        }
-        if (rule->complete_storage_mountables) {
+            break;
+        case SHELL_COMPLETION_SOURCE_STORAGE_MOUNTABLES:
             shell_completion_emit_storage_mountables(state);
-        }
-        if (rule->complete_storage_blocks) {
+            break;
+        case SHELL_COMPLETION_SOURCE_STORAGE_BLOCKS:
             shell_completion_emit_storage_blocks(state);
-        }
-        if (rule->complete_storage_unmount_targets) {
+            break;
+        case SHELL_COMPLETION_SOURCE_STORAGE_UNMOUNT_TARGETS:
             shell_completion_emit_storage_unmount_targets(state);
-        }
-        if (rule->complete_display_targets) {
+            break;
+        case SHELL_COMPLETION_SOURCE_DISPLAY_TARGETS:
             shell_completion_emit_display_targets(state);
-        }
-        if (rule->complete_display_modes) {
+            break;
+        case SHELL_COMPLETION_SOURCE_DISPLAY_MODES:
             shell_completion_emit_display_modes(state, tokens, token_count);
-        }
-        if (rule->complete_gpio_pins) {
+            break;
+        case SHELL_COMPLETION_SOURCE_INPUT_SOURCES:
+            shell_completion_emit_input_sources(
+                state,
+                (rule->flags & SHELL_COMPLETION_FLAG_ABSOLUTE_POINTERS) != 0U);
+            break;
+        case SHELL_COMPLETION_SOURCE_GPIO_PINS:
             shell_completion_emit_gpio_pins(state);
-        }
-        if (rule->complete_i2c_arguments) {
+            break;
+        case SHELL_COMPLETION_SOURCE_I2C_ARGUMENTS:
             shell_completion_emit_i2c_arguments(state, tokens, token_count);
-        }
-        if (rule->complete_onewire_buses) {
+            break;
+        case SHELL_COMPLETION_SOURCE_ONEWIRE_BUSES:
             shell_completion_emit_onewire_buses(state);
-        }
-        if (rule->complete_ps2_buses) {
+            break;
+        case SHELL_COMPLETION_SOURCE_PS2_BUSES:
             shell_completion_emit_ps2_buses(state);
-        }
-        if (rule->complete_midi_buses) {
+            break;
+        case SHELL_COMPLETION_SOURCE_MIDI_BUSES:
             shell_completion_emit_midi_buses(state);
-        }
-        if (rule->complete_spi_buses) {
+            break;
+        case SHELL_COMPLETION_SOURCE_SPI_BUSES:
             shell_completion_emit_spi_buses(state);
-        }
-        if (rule->complete_uart_buses) {
+            break;
+        case SHELL_COMPLETION_SOURCE_UART_BUSES:
             shell_completion_emit_uart_buses(state);
-        }
-        if (rule->complete_com_arguments) {
+            break;
+        case SHELL_COMPLETION_SOURCE_COM_ARGUMENTS:
             shell_completion_emit_com_arguments(state, tokens, token_count);
-        }
-        if (rule->complete_uart_arguments) {
+            break;
+        case SHELL_COMPLETION_SOURCE_UART_ARGUMENTS:
             shell_completion_emit_uart_arguments(state, tokens, token_count);
-        }
-        if (rule->complete_buses) {
+            break;
+        case SHELL_COMPLETION_SOURCE_BUSES:
             shell_completion_emit_buses(state);
-        }
-        if (rule->complete_spi_cs) {
+            break;
+        case SHELL_COMPLETION_SOURCE_SPI_CS:
             shell_completion_emit_spi_cs(state, tokens, token_count);
-        }
-        if (rule->complete_streams) {
-            shell_completion_emit_streams(state, rule->scalar_streams_only);
-        }
+            break;
+        case SHELL_COMPLETION_SOURCE_STREAMS:
+            shell_completion_emit_streams(
+                state,
+                (rule->flags & SHELL_COMPLETION_FLAG_SCALAR_STREAMS) != 0U);
+            break;
 #if SOLAR_OS_PACKAGE_SERVICE_CONTROLS
-        if (rule->complete_controls) {
+        case SHELL_COMPLETION_SOURCE_CONTROLS:
             shell_completion_emit_controls(state);
-        }
-        if (rule->complete_parameters) {
+            break;
+        case SHELL_COMPLETION_SOURCE_PARAMETERS:
             shell_completion_emit_parameters(state);
-        }
+            break;
+#else
+        case SHELL_COMPLETION_SOURCE_CONTROLS:
+        case SHELL_COMPLETION_SOURCE_PARAMETERS:
+            break;
 #endif
-        if (rule->complete_wifi_ssids) {
+        case SHELL_COMPLETION_SOURCE_WIFI_SSIDS:
             shell_completion_emit_wifi_ssids(state);
+            break;
         }
     }
 
@@ -7006,11 +7531,17 @@ static const shell_completion_rule_t *shell_completion_find_path_rule(const char
     const shell_completion_rule_t *best = NULL;
     size_t best_wildcards = SHELL_ARG_MAX + 1;
 
-    for (size_t i = 0; i < SHELL_ARRAY_COUNT(shell_completion_rules); i++) {
-        const shell_completion_rule_t *rule = &shell_completion_rules[i];
+    if (tokens == NULL || token_count == 0U) {
+        return NULL;
+    }
+
+    for (uint16_t rule_index = shell_completion_rule_first(tokens[0]);
+         rule_index != SHELL_COMPLETION_RULE_NONE;
+         rule_index = shell_completion_rule_next(rule_index, tokens[0])) {
+        const shell_completion_rule_t *rule = &shell_completion_rules[rule_index];
         size_t wildcards = 0;
 
-        if (!rule->complete_path ||
+        if ((rule->flags & SHELL_COMPLETION_FLAG_PATH) == 0U ||
             !shell_completion_path_matches(rule, tokens, token_count, &wildcards)) {
             continue;
         }
@@ -7083,6 +7614,18 @@ static bool shell_complete_argument(solar_os_context_t *ctx,
         prefix = parse->tokens[current_index];
     }
 
+#if SOLAR_OS_PACKAGE_APP_SSH || SOLAR_OS_PACKAGE_APP_SCP
+    if (shell_complete_ssh_host_argument(ctx,
+                                         effective_command,
+                                         completed_tokens,
+                                         completed_count,
+                                         prefix,
+                                         token_start,
+                                         show_matches)) {
+        return true;
+    }
+#endif
+
 #if SOLAR_OS_PACKAGE_SERVICE_OTA
     if (shell_complete_ota_flavor_argument(ctx,
                                            effective_command,
@@ -7133,14 +7676,22 @@ static bool shell_complete_argument(solar_os_context_t *ctx,
                                                             &state);
     if (!rule_seen) {
         if (path_rule != NULL) {
-            shell_complete_path(ctx, token_start, path_rule->dirs_only, show_matches);
+            shell_complete_path(
+                ctx,
+                token_start,
+                (path_rule->flags & SHELL_COMPLETION_FLAG_DIRS_ONLY) != 0U,
+                show_matches);
             return true;
         }
         return false;
     }
     if (state.count == 0) {
         if (path_rule != NULL) {
-            shell_complete_path(ctx, token_start, path_rule->dirs_only, show_matches);
+            shell_complete_path(
+                ctx,
+                token_start,
+                (path_rule->flags & SHELL_COMPLETION_FLAG_DIRS_ONLY) != 0U,
+                show_matches);
             return true;
         }
         return false;
@@ -7154,6 +7705,18 @@ static bool shell_complete_argument(solar_os_context_t *ctx,
         snprintf(completed,
                  sizeof(completed),
                  "%.*s%s ",
+                 (int)token_start,
+                 shell_session(ctx)->input,
+                 state.match);
+        shell_replace_input(ctx, completed);
+        return true;
+    }
+
+    if (!show_matches && strlen(state.match) > strlen(prefix)) {
+        char completed[SHELL_INPUT_MAX];
+        snprintf(completed,
+                 sizeof(completed),
+                 "%.*s%s",
                  (int)token_start,
                  shell_session(ctx)->input,
                  state.match);
@@ -7363,7 +7926,7 @@ static void cmd_exit(solar_os_context_t *ctx, int argc, char **argv)
         return;
     }
 
-    solar_os_context_request_exit(ctx);
+    solar_os_context_finish(ctx, 0, NULL);
     shell_session(ctx)->builtin_suppressed_prompt = true;
 }
 
@@ -8054,6 +8617,29 @@ void solar_os_shell_session_set_foreground_app(solar_os_shell_session_t *session
     }
 }
 
+void solar_os_shell_session_set_exit_result(solar_os_shell_session_t *session,
+                                            int exit_code,
+                                            const char *message)
+{
+    if (session == NULL) {
+        return;
+    }
+    session->last_exit_code = exit_code;
+    if (message == NULL || message[0] == '\0') {
+        session->exit_message_pending = false;
+        session->exit_message[0] = '\0';
+        return;
+    }
+    strlcpy(session->exit_message, message, sizeof(session->exit_message));
+    session->exit_message_pending = true;
+}
+
+int solar_os_shell_session_last_exit_code(
+    const solar_os_shell_session_t *session)
+{
+    return session != NULL ? session->last_exit_code : 0;
+}
+
 static bool shell_scp_arg_is_remote(const char *arg)
 {
     const char *colon = arg != NULL ? strchr(arg, ':') : NULL;
@@ -8154,9 +8740,15 @@ static bool shell_prepare_app_launch_args(
 }
 
 #if SOLAR_OS_PACKAGE_APP_PLAYGROUND
-static bool shell_launch_playground_script(solar_os_context_t *ctx,
-                                           int argc,
-                                           char **argv)
+static bool SHELL_NOINLINE shell_launch_playground_script(
+    solar_os_context_t *ctx,
+    int argc,
+    char **argv);
+
+static bool shell_launch_playground_script(
+    solar_os_context_t *ctx,
+    int argc,
+    char **argv)
 {
     solar_os_shell_io_t *io = terminal(ctx);
     if (argc < 3) {
@@ -8241,6 +8833,112 @@ static bool shell_launch_playground_script(solar_os_context_t *ctx,
     return false;
 }
 #endif
+
+static bool SHELL_NOINLINE shell_launch_registered_app(
+    solar_os_context_t *ctx,
+    const solar_os_app_registry_entry_t *app,
+    int argc,
+    char **argv,
+    const char *source,
+    size_t line_number)
+{
+    solar_os_shell_io_t *io = terminal(ctx);
+    char *launch_argv[SHELL_ARG_MAX];
+    shell_app_launch_storage_t launch_storage = {0};
+
+    if (shell_session(ctx)->watch_executing) {
+        solar_os_shell_io_printf(io,
+                                 "watch: cannot launch foreground app: %s\n",
+                                 app->name);
+        return true;
+    }
+    if (solar_os_shell_io_kind(io) == SOLAR_OS_SHELL_IO_KIND_PORT &&
+        (app->capabilities & SOLAR_OS_APP_CAP_PORT) == 0) {
+        solar_os_shell_io_printf(io,
+                                 "%s: display-only app; use the display shell\n",
+                                 app->name);
+        return true;
+    }
+
+    char owner[SOLAR_OS_APP_OWNER_MAX];
+    if (solar_os_app_registry_owner(app->app, owner, sizeof(owner))) {
+        solar_os_shell_io_printf(io,
+                                 "%s: already running on %s\n",
+                                 app->name,
+                                 owner[0] != '\0' ? owner : "another session");
+        return true;
+    }
+
+    solar_os_shell_diag_set_source(io, source, line_number);
+    if (!shell_prepare_app_launch_args(ctx,
+                                       app,
+                                       argc,
+                                       argv,
+                                       launch_argv,
+                                       &launch_storage)) {
+        solar_os_shell_diag_set_source(io, NULL, 0);
+        return true;
+    }
+    solar_os_shell_diag_set_source(io, NULL, 0);
+
+    const esp_err_t err =
+        solar_os_context_request_launch(ctx, app->app, argc, launch_argv);
+    if (err == ESP_OK) {
+        shell_session(ctx)->prompt_on_resume = true;
+        shell_session(ctx)->clear_on_resume =
+            (app->app->flags & SOLAR_OS_APP_FLAG_RESUMABLE) == 0;
+        return false;
+    }
+
+    solar_os_shell_diag_set_source(io, source, line_number);
+    if (err == ESP_ERR_INVALID_ARG && app->usage != NULL) {
+        solar_os_shell_diag_problem(io,
+                                    app->name,
+                                    "invalid launch arguments",
+                                    app->usage,
+                                    NULL);
+    } else {
+        solar_os_shell_diag_esp(io,
+                                app->name,
+                                err,
+                                "application could not start",
+                                NULL);
+    }
+    solar_os_shell_diag_set_source(io, NULL, 0);
+    return true;
+}
+
+static void SHELL_NOINLINE shell_report_unknown_command(
+    solar_os_shell_io_t *io,
+    const char *command,
+    const char *source,
+    size_t line_number)
+{
+    const char *candidate_names[128];
+    size_t candidate_count = 0;
+    for (size_t i = 0; i < shell_builtin_command_count &&
+                       candidate_count < SHELL_ARRAY_COUNT(candidate_names); i++) {
+        candidate_names[candidate_count++] = shell_builtin_commands[i].name;
+    }
+    for (size_t i = 0; i < solar_os_app_registry_count() &&
+                       candidate_count < SHELL_ARRAY_COUNT(candidate_names); i++) {
+        const solar_os_app_registry_entry_t *candidate = solar_os_app_registry_get(i);
+        if (candidate != NULL && !shell_builtin_command_exists(candidate->name)) {
+            candidate_names[candidate_count++] = candidate->name;
+        }
+    }
+    const char *suggestion =
+        solar_os_shell_suggest(command, candidate_names, candidate_count);
+    char alias_suggestion[SHELL_INPUT_MAX];
+    if (suggestion == NULL) {
+        suggestion = shell_alias_suggestion(command,
+                                            alias_suggestion,
+                                            sizeof(alias_suggestion));
+    }
+    solar_os_shell_diag_set_source(io, source, line_number);
+    solar_os_shell_diag_unknown(io, "shell", "command", command, suggestion, NULL);
+    solar_os_shell_diag_set_source(io, NULL, 0);
+}
 
 static bool shell_execute_line(solar_os_context_t *ctx,
                                const char *line,
@@ -8333,61 +9031,12 @@ static bool shell_execute_line(solar_os_context_t *ctx,
 
     const solar_os_app_registry_entry_t *app = solar_os_app_registry_find(argv[0]);
     if (app != NULL) {
-        char *launch_argv[SHELL_ARG_MAX];
-        shell_app_launch_storage_t launch_storage = {0};
-
-        if (shell_session(ctx)->watch_executing) {
-            solar_os_shell_io_printf(terminal(ctx),
-                                     "watch: cannot launch foreground app: %s\n",
-                                     app->name);
-            return true;
-        }
-        if (solar_os_shell_io_kind(shell_io(ctx)) == SOLAR_OS_SHELL_IO_KIND_PORT &&
-            (app->capabilities & SOLAR_OS_APP_CAP_PORT) == 0) {
-            solar_os_shell_io_printf(terminal(ctx),
-                                     "%s: display-only app; use the display shell\n",
-                                     app->name);
-            return true;
-        }
-
-        char owner[SOLAR_OS_APP_OWNER_MAX];
-        if (solar_os_app_registry_owner(app->app, owner, sizeof(owner))) {
-            solar_os_shell_io_printf(terminal(ctx),
-                                     "%s: already running on %s\n",
-                                     app->name,
-                                     owner[0] != '\0' ? owner : "another session");
-            return true;
-        }
-
-        solar_os_shell_diag_set_source(io, source, line_number);
-        if (!shell_prepare_app_launch_args(ctx,
+        return shell_launch_registered_app(ctx,
                                            app,
                                            argc,
                                            argv,
-                                           launch_argv,
-                                           &launch_storage)) {
-            solar_os_shell_diag_set_source(io, NULL, 0);
-            return true;
-        }
-        solar_os_shell_diag_set_source(io, NULL, 0);
-
-        const esp_err_t err = solar_os_context_request_launch(ctx, app->app, argc, launch_argv);
-        if (err == ESP_OK) {
-            shell_session(ctx)->prompt_on_resume = true;
-            shell_session(ctx)->clear_on_resume =
-                (app->app->flags & SOLAR_OS_APP_FLAG_RESUMABLE) == 0;
-            return false;
-        }
-
-        solar_os_shell_diag_set_source(io, source, line_number);
-        if (err == ESP_ERR_INVALID_ARG && app->usage != NULL) {
-            solar_os_shell_diag_problem(io, app->name, "invalid launch arguments",
-                                        app->usage, NULL);
-        } else {
-            solar_os_shell_diag_esp(io, app->name, err, "application could not start", NULL);
-        }
-        solar_os_shell_diag_set_source(io, NULL, 0);
-        return true;
+                                           source,
+                                           line_number);
     }
 
     bool alias_matched = false;
@@ -8397,29 +9046,7 @@ static bool shell_execute_line(solar_os_context_t *ctx,
         return alias_should_prompt;
     }
 
-    const char *candidate_names[128];
-    size_t candidate_count = 0;
-    for (size_t i = 0; i < shell_builtin_command_count &&
-                       candidate_count < SHELL_ARRAY_COUNT(candidate_names); i++) {
-        candidate_names[candidate_count++] = shell_builtin_commands[i].name;
-    }
-    for (size_t i = 0; i < solar_os_app_registry_count() &&
-                       candidate_count < SHELL_ARRAY_COUNT(candidate_names); i++) {
-        const solar_os_app_registry_entry_t *candidate = solar_os_app_registry_get(i);
-        if (candidate != NULL && !shell_builtin_command_exists(candidate->name)) {
-            candidate_names[candidate_count++] = candidate->name;
-        }
-    }
-    const char *suggestion =
-        solar_os_shell_suggest(argv[0], candidate_names, candidate_count);
-    char alias_suggestion[SHELL_INPUT_MAX];
-    if (suggestion == NULL) {
-        suggestion = shell_alias_suggestion(argv[0], alias_suggestion,
-                                            sizeof(alias_suggestion));
-    }
-    solar_os_shell_diag_set_source(io, source, line_number);
-    solar_os_shell_diag_unknown(io, "shell", "command", argv[0], suggestion, NULL);
-    solar_os_shell_diag_set_source(io, NULL, 0);
+    shell_report_unknown_command(io, argv[0], source, line_number);
     return true;
 }
 
@@ -8798,6 +9425,7 @@ static void shell_title(solar_os_context_t *ctx, char *buffer, size_t buffer_len
 static const solar_os_app_t shell_app = {
     .name = "shell",
     .summary = "SolarOS command shell",
+    .app_class = SOLAR_OS_APP_CLASS_TUI,
     .flags = SOLAR_OS_APP_FLAG_RESUMABLE | SOLAR_OS_APP_FLAG_KEY_EVENTS,
     .start = shell_start,
     .resume = shell_resume,

@@ -9,6 +9,18 @@ if(NOT SOLAR_OS_VERSION)
 endif()
 
 get_filename_component(SOLAR_OS_PROJECT_DIR "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+get_filename_component(SOLAR_OS_CMAKE_BINARY_DIR "${CMAKE_BINARY_DIR}" ABSOLUTE)
+if(SOLAR_OS_CMAKE_BINARY_DIR STREQUAL SOLAR_OS_PROJECT_DIR
+        AND DEFINED ENV{PIOENV}
+        AND NOT "$ENV{PIOENV}" STREQUAL "")
+    set(SOLAR_OS_GENERATED_BASE "${SOLAR_OS_PROJECT_DIR}/.pio/build/$ENV{PIOENV}")
+else()
+    set(SOLAR_OS_GENERATED_BASE "${SOLAR_OS_CMAKE_BINARY_DIR}")
+endif()
+set(SOLAR_OS_GENERATED_DIR "${SOLAR_OS_GENERATED_BASE}/generated/solar_os")
+
 if(NOT DEFINED SOLAR_OS_BOARD OR SOLAR_OS_BOARD STREQUAL "")
     if(DEFINED ENV{SOLAR_OS_BOARD} AND NOT "$ENV{SOLAR_OS_BOARD}" STREQUAL "")
         set(SOLAR_OS_BOARD "$ENV{SOLAR_OS_BOARD}")
@@ -19,9 +31,43 @@ if(NOT DEFINED SOLAR_OS_BOARD OR SOLAR_OS_BOARD STREQUAL "")
     endif()
 endif()
 
-set(SOLAR_OS_BOARD_CONFIG "${SOLAR_OS_PROJECT_DIR}/boards/${SOLAR_OS_BOARD}.cmake")
-if(NOT EXISTS "${SOLAR_OS_BOARD_CONFIG}")
-    message(FATAL_ERROR "SolarOS board target not found: ${SOLAR_OS_BOARD_CONFIG}")
+set(SOLAR_OS_BOARD_MANIFEST_DIR "${SOLAR_OS_PROJECT_DIR}/boards/manifests")
+set(SOLAR_OS_BOARD_MANIFEST "${SOLAR_OS_BOARD_MANIFEST_DIR}/${SOLAR_OS_BOARD}.toml")
+set(SOLAR_OS_BOARD_DRIVER_CATALOG "${SOLAR_OS_PROJECT_DIR}/boards/expansion_drivers.toml")
+set(SOLAR_OS_BOARD_GENERATOR "${SOLAR_OS_PROJECT_DIR}/scripts/generate_board_profile.py")
+if(EXISTS "${SOLAR_OS_BOARD_MANIFEST}")
+    set(SOLAR_OS_BOARD_CONFIG "${SOLAR_OS_GENERATED_DIR}/solar_os_board_config.cmake")
+    set(SOLAR_OS_GENERATED_BOARD_HEADER
+        "${SOLAR_OS_GENERATED_DIR}/solar_os_board_generated.h")
+    file(GLOB SOLAR_OS_BOARD_MANIFEST_INPUTS
+        "${SOLAR_OS_BOARD_MANIFEST_DIR}/*.toml"
+    )
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${SOLAR_OS_BOARD_GENERATOR}"
+        "${SOLAR_OS_PROJECT_DIR}/scripts/solaros_board_manifest.py"
+        "${SOLAR_OS_BOARD_DRIVER_CATALOG}"
+        ${SOLAR_OS_BOARD_MANIFEST_INPUTS}
+    )
+    execute_process(
+        COMMAND "${Python3_EXECUTABLE}"
+                "${SOLAR_OS_BOARD_GENERATOR}"
+                "--manifest" "${SOLAR_OS_BOARD_MANIFEST}"
+                "--manifest-dir" "${SOLAR_OS_BOARD_MANIFEST_DIR}"
+                "--drivers" "${SOLAR_OS_BOARD_DRIVER_CATALOG}"
+                "--cmake" "${SOLAR_OS_BOARD_CONFIG}"
+                "--header" "${SOLAR_OS_GENERATED_BOARD_HEADER}"
+        RESULT_VARIABLE SOLAR_OS_BOARD_GENERATE_RESULT
+    )
+    if(NOT SOLAR_OS_BOARD_GENERATE_RESULT EQUAL 0)
+        message(FATAL_ERROR "SolarOS board manifest generation failed")
+    endif()
+else()
+    set(SOLAR_OS_BOARD_CONFIG "${SOLAR_OS_PROJECT_DIR}/boards/${SOLAR_OS_BOARD}.cmake")
+    if(NOT EXISTS "${SOLAR_OS_BOARD_CONFIG}")
+        message(FATAL_ERROR
+            "SolarOS board target not found as a manifest or legacy profile: ${SOLAR_OS_BOARD}"
+        )
+    endif()
 endif()
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${SOLAR_OS_BOARD_CONFIG}")
 include("${SOLAR_OS_BOARD_CONFIG}")
@@ -45,6 +91,7 @@ set(SOLAR_OS_BOARD_CAPABILITY_NAMES
     AUDIO_INPUT
     WIFI
     BLE
+    PS2_KEYBOARD
     GPIO
     ADC
     PWM
@@ -64,6 +111,8 @@ set(SOLAR_OS_BOARD_CAPABILITY_NAMES
     TEMPERATURE
     HUMIDITY
     SIMD
+    POINTER
+    STREAMING_DISPLAY
 )
 set(SOLAR_OS_BOARD_CAPABILITY_DEFINES)
 set(SOLAR_OS_BOARD_AVAILABLE_CAPABILITIES)
@@ -104,6 +153,7 @@ solar_os_require_capability(EXPANSION_SPI SPI)
 solar_os_require_capability(EXPANSION_UART UART)
 solar_os_require_capability(EXPANSION_I2S GPIO)
 solar_os_require_capability(EXPANSION_I2S EXPANSION_GPIO)
+solar_os_require_capability(PS2_KEYBOARD GPIO)
 
 if(NOT DEFINED SOLAR_OS_BOARD_PSRAM_BYTES OR
         "${SOLAR_OS_BOARD_PSRAM_BYTES}" STREQUAL "")
@@ -123,7 +173,24 @@ if(NOT DEFINED SOLAR_OS_FLAVOR OR SOLAR_OS_FLAVOR STREQUAL "")
     endif()
 endif()
 
-set(SOLAR_OS_FLAVOR_INPUT "${SOLAR_OS_PROJECT_DIR}/flavors/${SOLAR_OS_FLAVOR}.toml")
+if(NOT DEFINED SOLAR_OS_LAYOUT OR SOLAR_OS_LAYOUT STREQUAL "")
+    if(DEFINED ENV{SOLAR_OS_LAYOUT} AND NOT "$ENV{SOLAR_OS_LAYOUT}" STREQUAL "")
+        set(SOLAR_OS_LAYOUT "$ENV{SOLAR_OS_LAYOUT}")
+    else()
+        set(SOLAR_OS_LAYOUT "ota")
+    endif()
+endif()
+if(NOT SOLAR_OS_LAYOUT STREQUAL "ota" AND NOT SOLAR_OS_LAYOUT STREQUAL "single")
+    message(FATAL_ERROR "Unsupported SolarOS update layout: ${SOLAR_OS_LAYOUT}")
+endif()
+
+if(DEFINED SOLAR_OS_FLAVOR_FILE AND NOT SOLAR_OS_FLAVOR_FILE STREQUAL "")
+    get_filename_component(SOLAR_OS_FLAVOR_INPUT "${SOLAR_OS_FLAVOR_FILE}" ABSOLUTE)
+elseif(DEFINED ENV{SOLAR_OS_FLAVOR_FILE} AND NOT "$ENV{SOLAR_OS_FLAVOR_FILE}" STREQUAL "")
+    get_filename_component(SOLAR_OS_FLAVOR_INPUT "$ENV{SOLAR_OS_FLAVOR_FILE}" ABSOLUTE)
+else()
+    set(SOLAR_OS_FLAVOR_INPUT "${SOLAR_OS_PROJECT_DIR}/flavors/${SOLAR_OS_FLAVOR}.toml")
+endif()
 if(NOT EXISTS "${SOLAR_OS_FLAVOR_INPUT}")
     message(FATAL_ERROR "SolarOS flavor not found: ${SOLAR_OS_FLAVOR_INPUT}")
 endif()
@@ -144,7 +211,6 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${SOLAR_OS_GENERATED_FONT_SENTINEL}"
 )
 
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
 file(GLOB SOLAR_OS_BOARD_METADATA_HEADERS
     "${SOLAR_OS_PROJECT_DIR}/include/boards/*.h"
 )
@@ -175,23 +241,23 @@ if(NOT SOLAR_OS_BOARD_METADATA_RESULT EQUAL 0)
     message(FATAL_ERROR "SolarOS board metadata validation failed")
 endif()
 
-get_filename_component(SOLAR_OS_CMAKE_BINARY_DIR "${CMAKE_BINARY_DIR}" ABSOLUTE)
-if(SOLAR_OS_CMAKE_BINARY_DIR STREQUAL SOLAR_OS_PROJECT_DIR
-        AND DEFINED ENV{PIOENV}
-        AND NOT "$ENV{PIOENV}" STREQUAL "")
-    set(SOLAR_OS_GENERATED_BASE "${SOLAR_OS_PROJECT_DIR}/.pio/build/$ENV{PIOENV}")
-else()
-    set(SOLAR_OS_GENERATED_BASE "${SOLAR_OS_CMAKE_BINARY_DIR}")
-endif()
-set(SOLAR_OS_GENERATED_DIR "${SOLAR_OS_GENERATED_BASE}/generated/solar_os")
 set(SOLAR_OS_GENERATED_HEADER "${SOLAR_OS_GENERATED_DIR}/solar_os_config.h")
 set(SOLAR_OS_GENERATED_CMAKE "${SOLAR_OS_GENERATED_DIR}/solar_os_config.cmake")
+if(NOT DEFINED SOLAR_OS_BOARD_REQUIRED_PACKAGES)
+    set(SOLAR_OS_BOARD_REQUIRED_PACKAGES)
+endif()
+string(REPLACE ";" " " SOLAR_OS_BOARD_REQUIRED_PACKAGE_LIST
+    "${SOLAR_OS_BOARD_REQUIRED_PACKAGES}"
+)
 execute_process(
     COMMAND "${Python3_EXECUTABLE}"
             "${SOLAR_OS_PROJECT_DIR}/scripts/generate_flavor_config.py"
             "--input" "${SOLAR_OS_FLAVOR_INPUT}"
             "--packages" "${SOLAR_OS_PACKAGE_CATALOG}"
             "--board-capabilities" "${SOLAR_OS_BOARD_AVAILABLE_CAPABILITY_LIST}"
+            "--board-required-packages" "${SOLAR_OS_BOARD_REQUIRED_PACKAGE_LIST}"
+            "--layout" "${SOLAR_OS_LAYOUT}"
+            "--target" "${IDF_TARGET}"
             "--header" "${SOLAR_OS_GENERATED_HEADER}"
             "--cmake" "${SOLAR_OS_GENERATED_CMAKE}"
     RESULT_VARIABLE SOLAR_OS_FLAVOR_GENERATE_RESULT
@@ -201,6 +267,7 @@ if(NOT SOLAR_OS_FLAVOR_GENERATE_RESULT EQUAL 0)
 endif()
 include("${SOLAR_OS_GENERATED_CMAKE}")
 message(STATUS "SolarOS flavor: ${SOLAR_OS_FLAVOR_NAME} (${SOLAR_OS_FLAVOR_INPUT})")
+message(STATUS "SolarOS update layout: ${SOLAR_OS_LAYOUT}")
 
 set(SOLAR_OS_MANUAL_INPUT "${SOLAR_OS_PROJECT_DIR}/doc/manual")
 set(SOLAR_OS_MANUAL_GENERATOR "${SOLAR_OS_PROJECT_DIR}/scripts/generate_manual.py")
@@ -301,11 +368,15 @@ set(SOLAR_OS_BOARD_NEEDS_I2C OFF)
 if(NOT DEFINED SOLAR_OS_BOARD_AUDIO_NEEDS_I2C)
     set(SOLAR_OS_BOARD_AUDIO_NEEDS_I2C OFF)
 endif()
+if(NOT DEFINED SOLAR_OS_BOARD_POINTER_NEEDS_I2C)
+    set(SOLAR_OS_BOARD_POINTER_NEEDS_I2C OFF)
+endif()
 if(SOLAR_OS_BOARD_HAS_I2C OR
         SOLAR_OS_BOARD_HAS_RTC OR
         SOLAR_OS_BOARD_HAS_TEMPERATURE OR
         SOLAR_OS_BOARD_HAS_HUMIDITY OR
-        SOLAR_OS_BOARD_AUDIO_NEEDS_I2C)
+        SOLAR_OS_BOARD_AUDIO_NEEDS_I2C OR
+        SOLAR_OS_BOARD_POINTER_NEEDS_I2C)
     set(SOLAR_OS_BOARD_NEEDS_I2C ON)
 endif()
 set(SOLAR_OS_BOARD_HAS_SENSORS OFF)
@@ -325,6 +396,7 @@ solar_os_require_board_driver("${SOLAR_OS_BOARD_HAS_GPIO}" GPIO SOLAR_OS_BOARD_G
 solar_os_require_board_driver("${SOLAR_OS_BOARD_HAS_ADC}" ADC SOLAR_OS_BOARD_ADC_DRIVER)
 solar_os_require_board_driver("${SOLAR_OS_BOARD_HAS_BATTERY}" BATTERY SOLAR_OS_BOARD_BATTERY_DRIVER)
 solar_os_require_board_driver("${SOLAR_OS_BOARD_HAS_PWM}" PWM SOLAR_OS_BOARD_PWM_DRIVER)
+solar_os_require_board_driver("${SOLAR_OS_BOARD_HAS_POINTER}" POINTER SOLAR_OS_BOARD_POINTER_DRIVER)
 
 if(NOT DEFINED SOLAR_OS_BOARD_SRCS)
     set(SOLAR_OS_BOARD_SRCS)
@@ -395,6 +467,12 @@ target_compile_definitions(${COMPONENT_LIB} PRIVATE
     SOLAR_OS_VERSION="${SOLAR_OS_VERSION}"
     SOLAR_OS_FLAVOR_STAMP="${SOLAR_OS_FLAVOR_STAMP}"
 )
+
+if(SOLAR_OS_BOARD_GENERATED)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE
+        SOLAR_OS_BOARD_GENERATED=1
+    )
+endif()
 
 if(SOLAR_OS_PACKAGE_SERVICE_MESHCORE)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE

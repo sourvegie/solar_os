@@ -55,13 +55,17 @@ service packages are not available on that board.
 - `solaros.sensors`: `environment` when environmental sensor support is compiled
 - `solaros.wifi`: `status`, `status_text`, `start`, `stop`, `connect`, `connect_saved`, `disconnect`, `forget`, `forget_ssid`, `forget_all`, `known`, `scan`, `ap_start`, `ap_stop`, `nat` when Wi-Fi support is compiled
 - `solaros.mqtt`: `status`, `connect`, `disconnect`, `publish`, `subscribe`, `read` when `network.mqtt` is compiled
-- `solaros.http`: `request`, `get`, `post`, `put`, `patch`, `delete`, `head`, `stream_open`, `stream_read`, `stream_close`, `stream_close_all` when `network.http-client` is compiled
+- `solaros.http`: bounded requests, retained same-origin sessions, and streaming handles when `network.http-client` is compiled
+- `solaros.ftp`: passive-mode list, download, upload, directory, delete, and rename operations when `network.ftp` is compiled
 - `solaros.hid`: typed `keyboard`, `mouse`, and `gamepad` tables when `service.hid` is compiled
 - `solaros.gpio`: constants `INPUT`, `OUTPUT`, `PULL_NONE`, `PULL_UP`, `PULL_DOWN`; functions `pins`, `allowed`, `mode`, `configure`, `read`, `write`, `release` when GPIO support is compiled. Pin tables include `expansion`, `allowed`, `available`, `claimed`, `owner`, and `policy` (`free`, `releasable`, or `fixed`).
 - `solaros.onewire`: `allowed`, `reset`, `scan`, `xfer` for the direct-pin compatibility API when OneWire support is compiled
 - `solaros.led`: `status`, `set`, `on`, `off`, `toggle` when GPIO support is compiled
 - `solaros.adc`: `pins`, `read` when ADC support is compiled
-- `solaros.controls`: `list`, `get`, `set` when continuous controls are compiled. Values use the normalized range `0.0..1.0`; create controls and typed bindings with the `control` shell command.
+- `solaros.controls`: `list`, `get`, `set`, `create`, `delete`, `clear`, `bindings`, `bind_parameter`, `bind_midi`, `unbind` when continuous controls are compiled. Values use the normalized range `0.0..1.0`.
+- `solaros.parameters`: `list`, `get`, `set` for dynamic native application parameters when continuous controls are compiled.
+- `solaros.midi`: `status`, `send`, `note_on`, `note_off`, `cc`, `program`, `read`/`receive`, `close`, `streams`, `stream_add`, `stream_remove`, `stream_clear` when MIDI support is compiled.
+- `solaros.osc`: `bindings`, `bind_stream`, `bind_event`, `bind_control`, `unbind`, `clear`, `encode_float`, `encode_int`, `dispatch`, `limits` when OSC support is compiled.
 - `solaros.dsp`: `backend`, `capabilities`, `dot`, `gain`, `mix`, `clip`, `level`, `window`, `fir`, and `fft` when `service.dsp` is compiled. Binary strings contain native little-endian signed 16-bit values; FIR and FFT constructors return caller-owned userdata.
 - `solaros.pwm`: constants `FREQ_MIN`, `FREQ_MAX`; functions `status`, `set`, `off` when PWM support is compiled
 - `solaros.buses`: constants `MODE0` through `MODE3`, `SPI2_HOST`, `SPI3_HOST`, `DEFAULT_SPEED`, `MAX_SPEED`; functions `list`, `get`, `create_spi`, `attach`, `detach`, `remove`, `spi_xfer`, `spi_read`, `spi_write` when the resource service is compiled; `create_i2c`, `i2c_probe`, `i2c_scan`, `i2c_read_reg`, and `i2c_write_reg` are additionally present when I2C support is compiled; `create_onewire`, `onewire_reset`, `onewire_scan`, and `onewire_xfer` are additionally present when OneWire support is compiled; `create_ps2` is present with PS/2 support; `create_uart`, `create_midi`, `uart_write`, and `uart_read` are additionally present when UART support is compiled
@@ -80,12 +84,50 @@ service packages are not available on that board.
 - `solaros.jobs`: `list`, `count`, `status`, `start`, `stop`
 - `solaros.sessions`: `create_shell`, `close`
 - `solaros.apps`: `list`, `find`
+- `solaros.input`: `sources`, `read`, `clear`, `status` for foreground pointer and axis events
 - `solaros.contacts`: `list`, `get` when provider-neutral messaging is compiled
 - `solaros.messages`: `conversations`, `list`, `send`, `mark_read`, `cancel` when provider-neutral messaging is compiled
 - `solaros.tui`: curses-like terminal drawing functions
 - `solaros.gfx`: foreground graphics drawing functions
 
 Lua strings are binary-safe, so byte-oriented APIs such as `uart.read`, `i2c.read_reg`, `clipboard.get`, and `mqtt.read().payload` return Lua strings.
+
+### Generic pointer and axis input
+
+`solaros.input.sources()` lists registered input sources with their numeric
+source, name, class, class name, capability bits, and ready state.
+`read([timeout_ms])` returns the next pointer or axis event table, or `nil`; the
+maximum timeout is 60000 ms. `clear()` discards queued events, and `status()`
+reports `available`, `queued`, `capacity`, and cumulative `dropped` counts.
+
+Pointer events contain source metadata, `pointer_id`, numeric and named
+`mode`/`action`, `x`, `y`, `delta_x`, `delta_y`, `buttons`, and `target`.
+Absolute touch sources use the coordinates; relative mice use the deltas. Axis
+events contain source metadata, numeric and named `axis`, `value`, and `delta`.
+
+```lua
+local solaros = require("solaros")
+local input = solaros.input
+
+input.clear()
+while not solaros.should_exit() do
+    local event = input.read(100)
+    if event and event.type == "pointer" then
+        if event.mode == input.MODE_ABSOLUTE then
+            print("touch", event.action_name, event.x, event.y)
+        else
+            print("mouse", event.delta_x, event.delta_y, event.buttons)
+        end
+    elseif event then
+        print("axis", event.axis_name, event.value, event.delta)
+    end
+end
+```
+
+The foreground queue holds 16 events and discards the oldest event when full.
+Agent and other headless source runners report `available=false` and return
+`nil`. Keyboard characters and navigation keys remain available through
+`solaros.tui.getch()`.
 
 ### Managed TCP, UDP, and WebSocket clients
 
@@ -144,6 +186,9 @@ firmware certificate bundle. The mirrored call forms are:
 - `head(url[, headers[, timeout_ms[, max_bytes[, follow_redirects]]]])`
 - `post`, `put`, `patch`, and `delete` use
   `(url[, body[, headers[, timeout_ms[, max_bytes[, follow_redirects]]]]])`
+- `session_open(origin)`
+- `session_request(handle, method, url[, body[, headers[, timeout_ms[, max_bytes]]]])`
+- `session_close(handle)` and `session_close_all()`
 - `stream_open(method, url[, body[, headers[, timeout_ms[, follow_redirects]]]])`
 - `stream_read(handle[, timeout_ms])`, `stream_close(handle)`, and
   `stream_close_all()`
@@ -157,6 +202,14 @@ accepts 0 through 262144. The response table contains `status_code`, binary
 prefix with `truncated=true`. HTTP 4xx and 5xx statuses are normal responses;
 request, cancellation, deadline, DNS, TLS, and transport failures raise Lua
 errors. Exiting or interrupting Lua cancels an active request.
+
+`session_open` retains one same-origin HTTP/TLS client. Its origin contains
+only scheme and authority. `session_request` rejects redirects and cross-origin
+URLs, clears previous request headers, and returns the same bounded response
+table as `request`. A stale connection is retried once only for GET or HEAD
+before any response starts; writes are never retried. Each runtime can retain
+two sessions, with four globally. Session handles close automatically at
+interpreter teardown, but scripts should close them explicitly.
 
 `stream_open` runs the HTTP operation in a native worker without an end-to-end
 deadline. Its timeout bounds each transport operation and accepts 0 through
@@ -183,15 +236,106 @@ response = solaros.http.post(
 print(response.status_code, response.body)
 ```
 
-A script-driven continuous control uses the same target mappings as an ADC
-potentiometer. Create it from the shell with
-`control create expression manual 0 1`, bind it, and start the `controls` job.
-Lua can then update it without constructing shell commands:
+```lua
+local handle = solaros.http.session_open("https://example.com")
+local first = solaros.http.session_request(handle, "GET", "https://example.com/a")
+local second = solaros.http.session_request(handle, "GET", "https://example.com/b")
+solaros.http.session_close(handle)
+```
+
+### FTP operations
+
+`solaros.ftp` uses synchronous, unencrypted IPv4 FTP. Each call connects,
+performs one operation with passive data connections, and disconnects:
+
+- `list(host[, path[, username[, password[, port]]]])`
+- `download(host, remote_path, local_path[, username[, password[, port]]])`
+- `upload(host, local_path, remote_path[, username[, password[, port]]])`
+- `mkdir`, `rmdir`, and `remove` use
+  `(host, path[, username[, password[, port]]])`
+- `rename(host, old_path, new_path[, username[, password[, port]]])`
+
+The defaults are `/`, `anonymous`, `solaros@`, and port `21`. Listings contain
+`name`, `is_directory`, and `size`. Local paths use SolarOS storage resolution.
+Failures raise a Lua error. FTP does not encrypt credentials or content; use it
+only on a trusted network.
 
 ```lua
+for _, item in ipairs(solaros.ftp.list("fileserver", "/incoming")) do
+    print(item.name, item.size)
+end
+solaros.ftp.download("fileserver", "/incoming/report.txt", "/notes/report.txt")
+```
+
+A script-driven continuous control uses the same target mappings as an ADC
+potentiometer. Lua can create, bind, inspect, and remove controls directly:
+
+```lua
+solaros.controls.create("expression")
+solaros.controls.bind_parameter(
+    "expression", "synth.filter.resonance", false
+)
+solaros.jobs.start("controls")
 solaros.controls.set("expression", 0.5)
 print(solaros.controls.get("expression"))
 ```
+
+`solaros.controls.create(name[, source, input_min, input_max, smoothing_ms,
+deadband, inverted])` omits `source` for manual controls. `bindings()` includes
+pickup, application, and error state. `bind_parameter()` and `bind_midi()`
+return binding IDs; `unbind()` returns the number removed.
+
+Dynamic app parameters are available through `solaros.parameters.list()`,
+`get(path)`, and `set(path, value)`. `set()` returns the authoritative
+native-unit value after the parameter's range and step handling.
+
+### MIDI
+
+The MIDI job must own a running bus before Lua transmits or receives. The
+following setup creates a bus, starts the worker, sends a note, and waits up to
+one second for a non-consuming subscriber message:
+
+```lua
+solaros.buses.create_midi("midi0", { tx = 2, rx = 3 })
+solaros.jobs.start("midi", { "midi0" })
+solaros.midi.note_on(1, 60, 100)
+local message = solaros.midi.read(1000)
+```
+
+`status()` includes traffic, parser, drop, error, CC-stream, and script
+subscription state. `send(status[, data1, data2])` validates raw messages;
+`note_on`, `note_off`, `cc`, and `program` provide channel-oriented helpers.
+`read()` and its `receive()` alias return a message table or `nil`, are bounded
+to 60 seconds, and are cancellation-aware. The subscription is automatically
+released when Lua exits; `close()` releases it earlier.
+
+Use `streams()`, `stream_add(channel, controller)`, `stream_remove(...)`, and
+`stream_clear()` to manage incoming CC scalar streams. Message tables contain
+`status`, `length`, `type`, and applicable channel/data fields.
+
+### Open Sound Control
+
+Lua configures native OSC bindings while the `osc` job retains UDP socket,
+filtering, and rate-limit ownership:
+
+```lua
+solaros.osc.bind_stream(
+    "ambient", "temperature", "/room/temperature", 2.0, 0.1
+)
+solaros.jobs.start(
+    "osc", { "listen=9000", "target=192.168.1.50:9001" }
+)
+```
+
+`bindings()` returns source configuration plus availability, values, timing,
+send counters, and errors. `bind_stream`, `bind_event`, and `bind_control`
+return numeric IDs; `unbind` and `clear` remove definitions. Event edges are
+`"rising"`, `"falling"`, or `"both"`; rates are `0.1..100` Hz.
+
+`encode_float()` and `encode_int()` return binary OSC messages that can be sent
+with `solaros.net.udp_send()`. `dispatch(packet)` validates a message or
+immediate bundle and applies the same native parameter routes as the job.
+`limits()` reports all public codec and binding bounds.
 
 For example, this plays a short saw-wave chord without running Lua in the
 real-time render callback:
@@ -355,12 +499,18 @@ local devices = solaros.buses.onewire_scan("onewire0")
 local reply = solaros.buses.onewire_xfer("onewire0", 9, "\xcc\x44")
 ```
 
-`solaros.expansion.drivers()` lists compiled drivers, and `devices()` lists
-active devices with normalized bindings. `attach(driver, name, bindings)` and
-`detach(name)` mirror the shell lifecycle. Binding tables accept `spi`, `cs`
-(or `ce`), `i2c`, `addr`, `uart`, `gpio`, `irq`, `reset` (or `rst`), `dc`,
-`busy`, `data`, `bck`, `din`, `rck`, `adc`, `pwm`, and `count`. `cs` requires
-`spi`, `addr` requires `i2c`, and unknown fields are rejected.
+`solaros.expansion.drivers()` lists compiled drivers. `devices()` lists active
+devices with `name`, `driver`, `origin` (`board` or `runtime`), `ready`,
+`autostart`, `detachable`, and normalized `bindings`. Each binding contains
+`kind`, `role`, `target`, `value`, and `aux`. `attach(driver, name, bindings)`
+and `detach(name)` mirror the shell lifecycle. Binding tables accept `spi`,
+`cs` (or `ce`), `i2c`, `addr`, `uart`, `ps2`, `gpio`, `irq`, `reset` (or
+`rst`), `dc`, `busy`, `data`, `bck`, `din`, `rck`, `mclk`, `ws`, `dout`,
+`adc`, `pwm`, `count`, `keys`, `x`, `y`, `min`, `center`, `max`, and
+`deadzone`. `ps2` names an
+existing PS/2 bus; `x` and `y` name scalar streams; `keys` maps logical key
+names to GPIO numbers. `cs` requires `spi`, `addr` requires `i2c`, and unknown
+fields are rejected.
 
 ```lua
 solaros.expansion.attach("pcd8544", "lcd0", {
@@ -445,7 +595,11 @@ their corresponding NVS keys are absent.
 
 ## TUI
 
-`solaros.tui` draws through the foreground UI queue. It exposes constants `NORMAL`, `BOLD`, `INVERSE`, plus common key constants such as `KEY_UP`, `KEY_DOWN`, `KEY_LEFT`, `KEY_RIGHT`, `KEY_ESCAPE`, `KEY_PAGE_UP`, and `KEY_PAGE_DOWN`.
+`solaros.tui` draws into one buffered foreground frame. `refresh()` atomically
+commits the changed cells. It exposes constants
+`NORMAL`, `BOLD`, `INVERSE`, plus common key constants such as `KEY_UP`,
+`KEY_DOWN`, `KEY_LEFT`, `KEY_RIGHT`, `KEY_CTRL_LEFT`, `KEY_CTRL_RIGHT`,
+`KEY_ESCAPE`, `KEY_PAGE_UP`, and `KEY_PAGE_DOWN`.
 
 Functions:
 
@@ -521,7 +675,11 @@ display framebuffer of the shell that launched the script; from a port or
 headless shell it raises an error because there is no foreground display.
 `begin(target)` claims a verified named display target, such as one returned by
 `solaros.expansion.devices()`, until `end()` or script cleanup. Colors are
-`WHITE`, `LIGHT`, `DARK`, `BLACK`, and `gray(level)` with `0..GRAY_MAX`. Fonts
+`WHITE`, `LIGHT`, `DARK`, `BLACK`, `gray(level)` with `0..GRAY_MAX`, and
+`rgb(red, green, blue)` with `0..255` components. On color TFT targets, the
+named colors and `gray(level)` span the `setterm foreground` and `background`
+theme, while `rgb(...)` remains literal. One-bit targets keep the existing
+luminance and ordered-dither path. Fonts
 are `FONT_SMALL`, `FONT_MONO`, `FONT_BOLD`, regular document fonts
 `FONT_MONO_12` through `FONT_MONO_20`, bold document fonts `FONT_BOLD_12`
 through `FONT_BOLD_20`, and matching italic/bold-italic constants. Italic
@@ -534,6 +692,7 @@ Functions:
 - `width()`, `height()`, `size()`
 - `clear([color])`
 - `gray(level)`
+- `rgb(red, green, blue)`
 - `color([color])`, `set_color(color)`
 - `font([font])`, `set_font(font)`
 - `pixel(x, y)`, `line(x0, y0, x1, y1)`
@@ -602,6 +761,8 @@ The Lua bridge intentionally does not expose raw SSH/SCP session handles. Those 
 ## Quick reference
 
 Load `solaros` and use its service tables for storage, time, networking,
-hardware, jobs, sessions, TUI, and graphics. Lua arrays are 1-based unless an
-individual service explicitly exposes a native index. Close resources and keep
-long-running loops cooperative.
+hardware, jobs, sessions, input, TUI, and graphics. Foreground pointer and axis
+events use solaros.input sources, read, clear, and status; keyboard characters
+use solaros.tui.getch(). Lua arrays are 1-based unless an individual service
+explicitly exposes a native index. Close resources and keep long-running loops
+cooperative.

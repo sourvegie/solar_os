@@ -26,6 +26,9 @@ Wildcard patterns are supported by selected filesystem commands, for example
 
 Tab completion covers commands, subcommands, filesystem paths, job names, port
 names, and stream IDs where the command exposes enough structure.
+For `ssh` and `scp`, it also reads host aliases from `/.ssh/hosts`. An explicit
+`user@` prefix is preserved; a unique SCP host match appends `:` for the remote
+path.
 
 `Ctrl+V` pastes the shared SolarOS clipboard at the command-line cursor. Line
 breaks and tabs become spaces, and a paste stops at the shell input limit; it
@@ -45,7 +48,11 @@ ordinary argument text containing punctuation remain valid.
 Shell scripts use the `.sh` extension. Run one with `sh <file>` or invoke its
 path directly; for example, `./somescript.sh` is equivalent to
 `sh ./somescript.sh`. SolarOS storage does not require an executable permission
-bit for this shorthand.
+bit for this shorthand. Use `echo` for script progress messages and `wait` to
+insert a whole-second delay between commands. `wait` does not put the device
+into light sleep. A foreground application
+launch ends the current script; the script does not resume after the application
+closes.
 
 History is kept in memory and cached at `/.shell/history` when storage is
 available. The optional user alias file follows the default storage volume:
@@ -83,6 +90,8 @@ The display-shell app exit chord is `CTRL+ALT+DEL`. Port shells use `Ctrl+]`.
 | `help` | `help [TOPIC]`; `help status`; `help update`; `help reset` | Browse the package-aware manual or manage its signed exact-version SD copy. |
 | `man` | `man TOPIC`; `man -k QUERY...`; `man --list` | Read or search the package-aware SolarOS manual. |
 | `clear` | `clear` | Clear the active shell terminal. |
+| `echo` | `echo [text...]` | Print the arguments separated by spaces, followed by a newline. Quotes preserve spaces and are not printed. |
+| `wait` | `wait <seconds>` | Pause the calling shell or shell script for 0 through 86400 seconds. |
 | `watch` | `watch [-n seconds] <command> [args...]` | Repeat another shell command until `Esc`, `q`, or the app-exit key is pressed. |
 | `sh` | `sh <file>` | Run a simple SolarOS shell script from storage. |
 | `exit` | `exit` | Close the current UART, USB CDC, or telnet shell when another interactive shell remains. |
@@ -219,7 +228,10 @@ job for periodic polling.
 | `identity` | `identity hostname <name>` | Save the device hostname in NVS; reboot to update Wi-Fi. |
 | `engine` | `engine [status|reset]` | Print or reset generic engine utilization counters for CPU/SIMD-style backends and vector bulk operations. |
 | `display` | `display [list]`; `display test <target>`; `display mode <target> [mode]` | List drawable display targets, draw a test pattern, or change driver-specific display settings. |
-| `status` | `status` | Print a compact system status summary. |
+| `input` | `input [status|keyboard|touch|mouse|joystick|dpad|buttons]` | List all input sources or filter them by semantic class. |
+| `input` | `input test <source>` | Show event counters and the last key, pointer, or axis event accepted from one source. |
+| `input` | `input calibrate <source> [set <min-x> <max-x> <min-y> <max-y> <width> <height>\|reset]` | Show, save, or reset coordinate calibration for an absolute-pointer source. |
+| `status` | `status` | Print a compact system summary, including the last foreground-app exit code. |
 | `uptime` | `uptime` | Print elapsed time since boot. |
 | `mem` | `mem [policy]` | Print heap status; `policy` also shows allocation-class counters, guarded fallback limits, and the last tagged failure. |
 | `top` | `top` | Print FreeRTOS task resource information when available. |
@@ -227,6 +239,10 @@ job for periodic polling.
 | `suspend` | `suspend` | Turn off the primary display and temporarily use the `lowpower` profile while services and jobs continue. Press KEY to resume. |
 | `power` | See below | Inspect and configure power policy. |
 | `setterm` | See below | Configure terminal/input preferences. Without arguments, opens the display TUI when available. |
+
+Input completion lists every current source after `input test`, only absolute
+pointer sources after `input calibrate`, `status` after an input class, and
+`set` or `reset` after a calibration source.
 
 `power` usage:
 
@@ -264,10 +280,13 @@ unchanged.
 
 ```text
 setterm
+setterm --display <target> [orientation|font|textsize|palette|statusbar] [value]
 setterm orientation [0|90|180|270]
 setterm font [mono|compact]
 setterm textsize [10|12|14|16|18|20]
 setterm palette [normal|inverted]
+setterm foreground [#RRGGBB]
+setterm background [#RRGGBB]
 setterm statusbar [show|hide]
 setterm brightness [0..100]
 setterm backlight [0..100]
@@ -276,14 +295,27 @@ setterm charset [utf8|ascii]
 setterm keyboard [us|de]
 setterm powerkey [sleep|suspend]
 setterm keyrate [off|1..60 [delay-ms]]
-setterm timezone [UTC|Europe/Berlin|POSIX-TZ]
+setterm ble [default|on|off]
+setterm timezone [UTC|UTC+/-offset|Europe/Berlin|POSIX-TZ]
 setterm startup [flash|sd]
 setterm otaurl [url]
 ```
 
-`setterm keyrate` configures the shared repeat policy for BLE keyboards, fixed
-board buttons, `gpio-keys`, joysticks, ADC D-pads, and future keyboard buses.
+`setterm keyrate` configures the shared repeat policy for BLE, PS/2, and CardKB
+keyboards, fixed board buttons, `gpio-keys`, and ADC D-pads. Analog joysticks
+publish axes and do not generate key events.
 The value is stored in NVS and is available on builds without BLE.
+
+`setterm ble` selects the next-boot BLE preference. `default` clears the saved
+override and follows the active board profile; `on` and `off` remain in effect
+across firmware updates until changed. The current boot is unchanged.
+
+`setterm timezone` accepts fixed offsets with the conventional UTC sign:
+`UTC-8` is eight hours behind UTC and `UTC+5:30` is five hours and 30 minutes
+ahead. Fixed offsets do not apply daylight-saving transitions. Other accepted
+timezone expressions use POSIX TZ syntax and its POSIX sign convention.
+SolarOS does not include the IANA timezone database; `Europe/Berlin` is a
+built-in daylight-saving alias.
 
 `setterm powerkey` selects the dedicated KEY short-press action. `sleep`
 enters explicit light sleep; `suspend` turns off the display while jobs and
@@ -312,6 +344,34 @@ remains independent of hardware inversion modes exposed by `display mode`, and
 does not rewrite an existing framebuffer. On a headless board, a port shell can
 set or query the persistent palette before an expansion-display session exists;
 subsequently created terminal and graphic sessions inherit it.
+
+`setterm --display <target>` reads or changes the volatile terminal profile of
+a named runtime display target, even when a TUI application rather than a shell
+owns that display. The target profile is initialized from the single global NVS
+parameter set when the display registers. Orientation is relative to the
+target's native panel rotation, so `0` keeps every display in its normal
+mounting even when their drivers use different U8g2 rotations. Display-targeted
+absolute pointer coordinates follow this logical orientation. A targeted change
+applies to current and future sessions on that display until reboot or until the
+display target is unregistered; it does not create or update per-display NVS
+keys. Without a setting, the command prints the target's complete volatile
+profile. For example:
+
+```text
+setterm --display oled0 statusbar hide
+setterm --display oled0 textsize 10
+setterm --display oled0 palette inverted
+```
+
+`foreground` and `background` select the persistent RGB theme colors for the
+built-in color display. They color terminal scanout and semantic GUI elements,
+including text, backgrounds, borders, and intermediate shades. Explicit RGB
+image, canvas, and script colors remain literal. Use six hexadecimal digits,
+for example `setterm foreground '#d8e8ff'` and `setterm background '#102030'`;
+the leading `#` can be omitted. The defaults are `#000000` and `#ffffff`.
+These settings do not add a color framebuffer or affect monochrome-display
+rendering. `palette inverted` continues to exchange the foreground and
+background roles.
 
 `setterm statusbar hide` removes the top status bar from graphical shell
 sessions and gives its space to the terminal. `show` restores it. The default is
@@ -345,6 +405,9 @@ sessions and gives its space to the terminal. `show` restores it. The default is
 Port shells default to `--term auto`. Auto mode sends a terminal Device
 Attributes probe; a recognizable response enables VT100-style cursor controls
 and a size probe, while no response falls back to a dumb line-oriented shell.
+The dumb profile can run line-oriented shell commands, but cursor-addressable
+TUI applications cannot run on it and report
+`<app>: can't run on a dumb terminal`.
 Use `--term vt100` or `--term ansi` to force escape-sequence output,
 `--term dumb` for plain text, and `--size COLSxROWS` to set the terminal
 dimensions without probing. Character encoding is independent of that profile:
@@ -542,6 +605,7 @@ xfer recv <port> <file> --zmodem [--append|--replace]
 | `ble` | `ble [status]` | Show BLE keyboard state and the current/next boot setting. |
 | `ble` | `ble enable` | Save BLE enabled for the next boot. The current boot is unchanged. |
 | `ble` | `ble disable` | Save BLE disabled for the next boot. The current boot is unchanged. |
+| `ble` | `ble default` | Clear the saved override and use the board default on the next boot. |
 | `ble` | `ble scan` | Scan nearby BLE devices. |
 | `ble` | `ble pair` | Start keyboard pairing. |
 | `ble` | `ble forget` | Erase the remembered keyboard from NVS and remove its BLE bond. |
@@ -563,11 +627,14 @@ client subset are rejected. Use `wireguard down` before importing a replacement
 profile or using `wireguard forget`. See [WireGuard VPN client](network.md#wireguard)
 for routing, secret, and disconnect behavior.
 
-BLE is enabled by default when no saved setting exists, including after `nvs
-clear`. The `ble enable` and `ble disable` settings take effect only after a
-reboot. Disabling BLE does not forget the remembered keyboard or erase its BLE
-bond. On a BLE-disabled boot, SolarOS returns the unused Bluetooth controller
-and host memory to the internal heap before normal service initialization.
+When no saved preference exists, including after `nvs clear`, BLE follows the
+board default. Most boards enable it; TTGO VGA32 v1.4 disables it to preserve
+internal heap. `setterm ble on|off|default` stores or clears the preference for
+the next boot. `ble enable`, `ble disable`, and `ble default` are equivalent
+compatibility commands. Disabling BLE does not forget the remembered keyboard
+or erase its BLE bond. On a BLE-disabled boot, SolarOS returns the unused
+Bluetooth controller and host memory to the internal heap before normal service
+initialization.
 
 BLE GATT usage:
 
@@ -671,10 +738,14 @@ available for the compiled board.
 | `neopixel` | `neopixel fill <name> <red> <green> <blue>` | Fill and immediately refresh the strip. Color components are `0..255`. |
 | `neopixel` | `neopixel clear\|show <name>` | Clear a strip immediately, or transmit its buffered colors. |
 | `midi` | `midi status` | Show MIDI worker, traffic, parser, and queue status. |
+| `midi` | `midi monitor` | Print incoming CC and key messages until the app-exit key, `Esc`, or `q` is pressed. |
 | `midi` | `midi note-on\|note-off <channel> <note> [velocity]` | Queue a MIDI note message for transmission. |
 | `midi` | `midi cc <channel> <controller> <value>` | Queue a MIDI control-change message. |
 | `midi` | `midi program <channel> <program>` | Queue a MIDI program-change message. |
 | `midi` | `midi send <status> [data1] [data2]` | Queue one validated raw MIDI message. |
+| `midi` | `midi stream list` | List configured incoming MIDI CC scalar streams and their latest values. |
+| `midi` | `midi stream add\|remove <channel> <controller>` | Register or remove `midi.cc.<channel>.<controller>` as a scalar stream. |
+| `midi` | `midi stream clear` | Remove all configured MIDI CC scalar streams. |
 | `control` | `control list\|parameters\|bindings` | Inspect normalized controls, native app parameters, or target bindings. |
 | `control` | `control create <name> <stream> <min> <max> [smooth=ms] [deadband=value] [invert]` | Normalize a scalar stream as a named continuous control; use `manual` for script-supplied values. |
 | `control` | `control bind <name> parameter <path> [pickup=on\|off]` | Bind a control to a typed native-app parameter with optional soft takeover. |
@@ -683,6 +754,11 @@ available for the compiled board.
 | `control` | `control parameter get\|set <path> [value]` | Read or set an available native parameter in its declared unit. |
 | `control` | `control unbind <name>` | Remove all target bindings owned by one named control. |
 | `control` | `control delete <name>` or `control clear` | Remove one control and its bindings, or remove all controls and bindings. |
+| `osc` | `osc bindings` | Inspect named outbound OSC bindings and their live source, value, send, and error state. |
+| `osc` | `osc bind <name> stream <stream> <address> [rate=hz] [delta=value] [send=change\|always]` | Publish one scalar stream as OSC float32 values in its native unit. |
+| `osc` | `osc bind <name> stream <event-stream> <address> edge=rising\|falling\|both [rate=hz]` | Publish sampled boolean transitions as OSC int32 `0` or `1`. |
+| `osc` | `osc bind <name> control <control> <address> [rate=hz] [send=change\|always]` | Publish one normalized named control as an OSC float32 value from `0.0..1.0`. |
+| `osc` | `osc unbind <name>` or `osc clear` | Remove one outbound binding or all outbound bindings. |
 | `radio` | `radio` | Open the packet-radio TUI with live status and editable common config. |
 | `radio` | `radio status|list` | List packet radios registered by expansion drivers. |
 | `radio` | `radio status <name>` | Show one packet radio, its capabilities, state, and current config. |
@@ -696,7 +772,10 @@ available for the compiled board.
 | `meshcore` | `meshcore identity show\|generate\|import\|export` | Inspect or explicitly manage the private MeshCore identity. |
 | `meshcore` | `meshcore name [name]` | Show or set the MeshCore-specific advertised name. |
 | `meshcore` | `meshcore advert zero\|flood` | Queue a local or explicitly network-wide advert. |
-| `meshcore` | `meshcore channel list\|add\|remove\|public` | Manage bounded shared-key groups while the job is stopped. |
+| `meshcore` | `meshcore channel list\|add\|remove\|public` | Join public hashtag channels or manage bounded shared-key groups while the job is stopped. |
+| `meshcore` | `meshcore stream list` or `meshcore stream status [port]` | Inspect trusted peer-bound virtual serial ports carried by encrypted MeshCore direct packets. |
+| `meshcore` | `meshcore stream create <port> <trusted-endpoint-id>` | Register a reliable MeshCore virtual serial port for one exact trusted endpoint. Configure both peers. |
+| `meshcore` | `meshcore stream remove <port>` | Remove an unclaimed MeshCore virtual serial port. |
 | `radio` | `radio state <name> [sleep|standby|rx|tx]` | Show or change radio operating state. |
 | `radio` | `radio send <name> <text|byte...>` | Send one packet. |
 | `radio` | `radio recv <name> [timeout-ms]` | Receive one packet and print metadata plus payload. |
@@ -734,9 +813,6 @@ available for the compiled board.
 | `dpad` | `dpad [status]` | Show ADC D-pad pins, raw values, zones, and calibration thresholds. |
 | `dpad` | `dpad calibrate [idle]` | Calibrate the current D-pad idle value. |
 | `dpad` | `dpad calibrate reset` | Restore the compiled D-pad calibration. |
-| `joystick` | `joystick [status]` | Show joystick axes, raw values, direction, and thresholds. |
-| `joystick` | `joystick calibrate` | Calibrate the current joystick center. |
-| `joystick` | `joystick calibrate reset` | Restore the compiled joystick calibration. |
 | `pwm` | `pwm status` | Show PWM state. |
 | `pwm` | `pwm set <pin> <freq-hz> <duty-percent>` | Start LEDC PWM on a runtime pin. |
 | `pwm` | `pwm off <pin>` | Stop PWM on a pin. |

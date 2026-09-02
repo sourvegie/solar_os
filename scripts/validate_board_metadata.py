@@ -14,12 +14,21 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 import sys
+import tomllib
+
+from solaros_board_manifest import (
+    ManifestError,
+    load_board_manifest,
+    load_driver_catalog,
+    validate_board as validate_board_manifest,
+)
 
 
 CAPABILITY_DEPENDENCIES = {
     "DISPLAY": ("GFX",),
     "DISPLAY_BRIGHTNESS": ("DISPLAY",),
     "AUDIO_INPUT": ("AUDIO",),
+    "PS2_KEYBOARD": ("GPIO",),
     "EXPANSION_GPIO": ("GPIO",),
     "EXPANSION_I2C": ("I2C",),
     "EXPANSION_SPI": ("SPI",),
@@ -45,6 +54,7 @@ class BoardMetadata:
     capabilities: frozenset[str]
     macros: dict[str, str]
     static_buses: tuple[tuple[str, str], ...]
+    required_packages: frozenset[str]
 
 
 def _logical_lines(text: str) -> list[str]:
@@ -83,6 +93,16 @@ def _cmake_value(text: str, name: str) -> str | None:
     if not match:
         return None
     return match.group(1) if match.group(1) is not None else match.group(2)
+
+
+def _cmake_list(text: str, name: str) -> frozenset[str]:
+    match = re.search(rf"set\(\s*{re.escape(name)}\s+(.*?)\)", text, re.DOTALL)
+    if not match:
+        return frozenset()
+    values: set[str] = set()
+    for quoted, bare in re.findall(r'"([^"]+)"|([^\s\)]+)', match.group(1)):
+        values.update(value for value in (quoted or bare).split(";") if value)
+    return frozenset(values)
 
 
 def _mask_pins(macros: dict[str, str], name: str, seen: frozenset[str] = frozenset()) -> set[int]:
@@ -158,7 +178,8 @@ def _static_bus_pins(macros: dict[str, str]) -> dict[str, set[int]]:
         body = value[match.end():end]
         pins: set[int] = set()
         for token in re.findall(
-            r"\.(?:sda_pin|scl_pin|sclk_pin|miso_pin|mosi_pin|tx_pin|rx_pin|pin)\s*=\s*"
+            r"\.(?:sda_pin|scl_pin|sclk_pin|miso_pin|mosi_pin|tx_pin|rx_pin|"
+            r"clock_pin|data_pin|pin)\s*=\s*"
             r"([A-Z][A-Z0-9_]*|\d+)",
             body,
         ):
@@ -170,6 +191,24 @@ def _static_bus_pins(macros: dict[str, str]) -> dict[str, set[int]]:
                 pins.add(pin)
         result[match.group(1)] = pins
     return result
+
+
+def _default_device_binding_pins(macros: dict[str, str]) -> set[int]:
+    value = macros.get("SOLAR_OS_BOARD_DEFAULT_EXPANSION_DEVICES", "")
+    pins: set[int] = set()
+    for _kind, token in re.findall(
+        r"\.kind\s*=\s*SOLAR_OS_EXPANSION_BINDING_"
+        r"(GPIO|ADC|PWM|SPI_CS).*?"
+        r"\.value\s*=\s*([A-Z][A-Z0-9_]*|\d+)",
+        value,
+    ):
+        if token.isdigit():
+            pins.add(int(token))
+            continue
+        pin = _gpio_value(macros, token)
+        if pin is not None:
+            pins.add(pin)
+    return pins
 
 
 def _parse_gpio_text(value: str) -> set[int]:
@@ -304,6 +343,7 @@ def _load_board(
         capabilities=frozenset(capabilities),
         macros=macros,
         static_buses=_static_buses(macros),
+        required_packages=_cmake_list(cmake_text, "SOLAR_OS_BOARD_REQUIRED_PACKAGES"),
     ), errors
 
 
@@ -354,6 +394,29 @@ def _validate_pin_metadata(board: BoardMetadata) -> list[str]:
             f"{_format_pins(missing_slots)}"
         )
 
+    try:
+        default_binding_pins = _default_device_binding_pins(macros)
+        static_bus_pins = (
+            set().union(*_static_bus_pins(macros).values())
+            if board.static_buses
+            else set()
+        )
+    except ValueError as exc:
+        errors.append(f"{board.board_id}: {exc}")
+    else:
+        missing_default_pins = default_binding_pins - set(slots)
+        if missing_default_pins:
+            errors.append(
+                f"{board.board_id}: board-default device pins missing from GPIO slots: "
+                f"{_format_pins(missing_default_pins)}"
+            )
+        missing_bus_pins = static_bus_pins - set(slots)
+        if missing_bus_pins:
+            errors.append(
+                f"{board.board_id}: static bus pins missing from GPIO slots: "
+                f"{_format_pins(missing_bus_pins)}"
+            )
+
     for capability, mask_name in PIN_SURFACES:
         try:
             pins = _mask_pins(macros, mask_name)
@@ -373,12 +436,28 @@ def _validate_pin_metadata(board: BoardMetadata) -> list[str]:
     if len(bus_names) != len(set(bus_names)):
         errors.append(f"{board.board_id}: static bus names are not unique")
     for name, protocol in board.static_buses:
-        capability = "GPIO" if protocol == "ONEWIRE" else protocol
+        capability = "GPIO" if protocol in ("ONEWIRE", "PS2") else protocol
         if capability not in board.capabilities:
             errors.append(
                 f"{board.board_id}: static bus {name} uses {protocol} without "
                 f"{capability} capability"
             )
+
+    ps2_buses = {name for name, protocol in board.static_buses if protocol == "PS2"}
+    if "PS2_KEYBOARD" in board.capabilities:
+        if not ps2_buses:
+            errors.append(f"{board.board_id}: PS2_KEYBOARD requires a static PS2 bus")
+        if "expansion_ps2_keyboard" not in board.required_packages:
+            errors.append(
+                f"{board.board_id}: PS2_KEYBOARD requires board package "
+                "expansion_ps2_keyboard"
+            )
+
+    ble_default = macros.get("SOLAR_OS_BOARD_DEFAULT_BLE_ENABLED")
+    if ble_default is not None and ble_default not in ("0", "1"):
+        errors.append(
+            f"{board.board_id}: SOLAR_OS_BOARD_DEFAULT_BLE_ENABLED must be 0 or 1"
+        )
 
     for mask_name, required in (
         ("SOLAR_OS_BOARD_RUNTIME_SPI_HOST_MASK", ("SPI", "EXPANSION_SPI")),
@@ -494,6 +573,69 @@ def _validate_documentation(root: Path, board: BoardMetadata) -> list[str]:
     return errors
 
 
+def _validate_manifest_boards(root: Path, board_ids: tuple[str, ...]) -> list[str]:
+    errors: list[str] = []
+    manifest_dir = root / "boards" / "manifests"
+    if not manifest_dir.is_dir():
+        return errors
+    try:
+        drivers = load_driver_catalog(root / "boards" / "expansion_drivers.toml")
+    except (OSError, ManifestError, tomllib.TOMLDecodeError) as exc:
+        return [f"expansion driver catalog: {exc}"]
+    paths = sorted(manifest_dir.glob("*.toml"))
+    if board_ids:
+        requested = set(board_ids)
+        paths = [path for path in paths if path.stem in requested]
+    platformio = (root / "platformio.ini").read_text(encoding="utf-8")
+    boards_doc = (root / "doc" / "manual" / "boards.md").read_text(encoding="utf-8")
+    for path in paths:
+        try:
+            with path.open("rb") as manifest_file:
+                raw_manifest = tomllib.load(manifest_file)
+            board = load_board_manifest(path, manifest_dir)
+            validate_board_manifest(board, drivers)
+        except (OSError, ManifestError, tomllib.TOMLDecodeError) as exc:
+            errors.append(f"{path.stem}: {exc}")
+            continue
+        identity = board["board"]
+        target = board["target"]
+        if identity["id"] != path.stem:
+            errors.append(
+                f"{path.stem}: manifest board.id is {identity['id']!r}"
+            )
+        env_match = re.search(
+            rf"^\[env:{re.escape(identity['id'])}\](.*?)(?=^\[|\Z)",
+            platformio,
+            re.MULTILINE | re.DOTALL,
+        )
+        if env_match:
+            body = env_match.group(1)
+            if f"-DSOLAR_OS_BOARD={identity['id']}" not in body:
+                errors.append(
+                    f"{identity['id']}: PlatformIO environment does not select its manifest"
+                )
+            board_match = re.search(r"^board\s*=\s*([^\s]+)\s*$", body, re.MULTILINE)
+            if not board_match or board_match.group(1) != target["platformio_board"]:
+                errors.append(
+                    f"{identity['id']}: PlatformIO board differs from target.platformio_board"
+                )
+        else:
+            compatible_env = re.search(
+                rf"^\[env:[^]]+\](.*?^board\s*=\s*{re.escape(target['platformio_board'])}\s*$.*?)"
+                rf"(?=^\[|\Z)",
+                platformio,
+                re.MULTILINE | re.DOTALL,
+            )
+            if not compatible_env:
+                errors.append(
+                    f"{identity['id']}: no PlatformIO environment uses "
+                    f"target.platformio_board {target['platformio_board']!r}"
+                )
+        if "extends" not in raw_manifest and f"`{identity['id']}`" not in boards_doc:
+            errors.append(f"{identity['id']}: missing from doc/manual/boards.md target table")
+    return errors
+
+
 def validate(root: Path, board_ids: tuple[str, ...] = ()) -> list[str]:
     root = root.resolve()
     errors, known_caps = _validate_global_metadata(root)
@@ -512,6 +654,7 @@ def validate(root: Path, board_ids: tuple[str, ...] = ()) -> list[str]:
         errors.extend(_validate_pin_metadata(board))
         errors.extend(_validate_registration(root, board))
         errors.extend(_validate_documentation(root, board))
+    errors.extend(_validate_manifest_boards(root, board_ids))
     return errors
 
 

@@ -142,14 +142,18 @@ the messaging API or owner of conversation history. Messaging first
 publishes a normalized message, releases its lock, publishes the notification,
 then links the returned Inbox ID using the message key and the current
 generation. Marking a message read updates its linked Inbox entry after
-releasing the messaging lock.
+releasing the messaging lock. `inbox clear` removes notification projections,
+not retained conversation history. It also invalidates every Messaging-to-Inbox
+link and persists that unlink, so a reset Inbox ID cannot later target a new,
+unrelated notification. Message delete and mark-read verify the linked Inbox
+entry's source message ID before changing it.
 
 Inbox notification sound is a persisted policy and defaults to on when the
 board has audio output. It can be disabled with `inbox notify off`.
 Only a newly committed, non-duplicate entry can request it. Bursts are
 coalesced, and the request is dropped while another audio user is active.
-`service.audio-board` owns the bounded tone queue, built-in playback
-serialization, and cancellation; Inbox never drives board audio directly.
+`service.audio` owns the bounded tone queue, primary-backend playback
+serialization, and cancellation; Inbox never drives an audio driver directly.
 
 Deleting a retained message also deletes its linked Inbox projection. Provider
 history can be cleared independently with `messages clear gateway`,
@@ -158,6 +162,8 @@ clears all three. A clear is rejected while the selected provider has queued
 outbound work, avoiding an outbox entry whose message has been removed. Clear
 also sweeps the provider-owned Inbox source tags, so stale projections survive
 neither ring wrap nor an in-flight publish; unrelated Inbox sources remain.
+To remove both views, run `inbox clear` and the applicable `messages clear`
+command; either order is safe.
 
 ## Persistence
 

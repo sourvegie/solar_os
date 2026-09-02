@@ -1,6 +1,5 @@
 #include "solar_os_ble_keyboard.h"
 
-#include <ctype.h>
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdarg.h>
@@ -22,6 +21,8 @@
 #include "esp_private/esp_hidh_private.h"
 #include "soc/soc_caps.h"
 #include "solar_os_hid_keyboard_report.h"
+#include "solar_os_ble_keyboard_scan_policy.h"
+#include "solar_os_board.h"
 #include "solar_os_log.h"
 #include "solar_os_input.h"
 #include "solar_os_power.h"
@@ -55,18 +56,6 @@
 #define BLE_GATT_CONNECT_TIMEOUT_MS 12000U
 #define BLE_GATT_OPERATION_TIMEOUT_MS 5000U
 #define BLE_GATT_INVALID_CONN_ID UINT16_MAX
-#define HID_MOD_CTRL 0x11
-#define HID_MOD_SHIFT 0x22
-#define HID_MOD_LEFT_ALT 0x04
-#define HID_MOD_RIGHT_ALT 0x40
-#define HID_MOD_ALT (HID_MOD_LEFT_ALT | HID_MOD_RIGHT_ALT)
-#define LATIN1_A_UMLAUT_UPPER ((char)0xc4)
-#define LATIN1_O_UMLAUT_UPPER ((char)0xd6)
-#define LATIN1_U_UMLAUT_UPPER ((char)0xdc)
-#define LATIN1_SHARP_S ((char)0xdf)
-#define LATIN1_A_UMLAUT_LOWER ((char)0xe4)
-#define LATIN1_O_UMLAUT_LOWER ((char)0xf6)
-#define LATIN1_U_UMLAUT_LOWER ((char)0xfc)
 
 typedef enum {
     BLE_KEYBOARD_IDLE,
@@ -146,8 +135,10 @@ static bool hidh_initialized;
 static bool classic_bt_memory_released;
 /* Freeze the current-boot policy before shell changes update the next boot. */
 static bool boot_policy_loaded;
-static bool enabled_for_current_boot = true;
-static bool enabled_for_next_boot = true;
+static bool enabled_for_current_boot = SOLAR_OS_BOARD_DEFAULT_BLE_ENABLED != 0;
+static bool enabled_for_next_boot = SOLAR_OS_BOARD_DEFAULT_BLE_ENABLED != 0;
+static solar_os_ble_keyboard_boot_setting_t next_boot_setting =
+    SOLAR_OS_BLE_KEYBOARD_BOOT_DEFAULT;
 static bool disabled_boot_memory_release_attempted;
 static esp_err_t disabled_boot_memory_release_result = ESP_OK;
 static bool connected;
@@ -171,7 +162,6 @@ static solar_os_ble_keyboard_scan_result_t *active_scan_results;
 static size_t active_scan_max_results;
 static size_t active_scan_result_count;
 static ble_keyboard_peer_t remembered_peers[BLE_KEYBOARD_MAX_REMEMBERED];
-static solar_os_ble_keyboard_layout_t keyboard_layout = SOLAR_OS_BLE_KEYBOARD_LAYOUT_US;
 static ble_gatt_state_t gatt_state = {
     .gattc_if = ESP_GATT_IF_NONE,
     .conn_id = BLE_GATT_INVALID_CONN_ID,
@@ -193,8 +183,9 @@ static esp_err_t load_boot_policy(void)
         return ESP_OK;
     }
 
-    enabled_for_current_boot = true;
-    enabled_for_next_boot = true;
+    enabled_for_current_boot = solar_os_ble_keyboard_board_default_enabled();
+    enabled_for_next_boot = enabled_for_current_boot;
+    next_boot_setting = SOLAR_OS_BLE_KEYBOARD_BOOT_DEFAULT;
 
     esp_err_t ret = init_nvs();
     if (ret != ESP_OK) {
@@ -227,6 +218,9 @@ static esp_err_t load_boot_policy(void)
 
     enabled_for_current_boot = stored != 0U;
     enabled_for_next_boot = enabled_for_current_boot;
+    next_boot_setting = enabled_for_current_boot
+                            ? SOLAR_OS_BLE_KEYBOARD_BOOT_ENABLED
+                            : SOLAR_OS_BLE_KEYBOARD_BOOT_DISABLED;
     boot_policy_loaded = true;
     return ESP_OK;
 }
@@ -235,7 +229,7 @@ bool solar_os_ble_keyboard_enabled_for_current_boot(void)
 {
     const esp_err_t ret = load_boot_policy();
     if (ret != ESP_OK) {
-        SOLAR_OS_LOGW(TAG, "load BLE boot policy failed; defaulting to enabled: %s",
+        SOLAR_OS_LOGW(TAG, "load BLE boot policy failed; using board default: %s",
                       esp_err_to_name(ret));
     }
     return enabled_for_current_boot;
@@ -247,8 +241,64 @@ bool solar_os_ble_keyboard_enabled_for_next_boot(void)
     return enabled_for_next_boot;
 }
 
-esp_err_t solar_os_ble_keyboard_set_enabled_for_next_boot(bool enabled)
+bool solar_os_ble_keyboard_board_default_enabled(void)
 {
+    return SOLAR_OS_BOARD_DEFAULT_BLE_ENABLED != 0;
+}
+
+solar_os_ble_keyboard_boot_setting_t solar_os_ble_keyboard_boot_setting(void)
+{
+    (void)solar_os_ble_keyboard_enabled_for_current_boot();
+    return next_boot_setting;
+}
+
+const char *solar_os_ble_keyboard_boot_setting_name(
+    solar_os_ble_keyboard_boot_setting_t setting)
+{
+    switch (setting) {
+    case SOLAR_OS_BLE_KEYBOARD_BOOT_DEFAULT:
+        return "default";
+    case SOLAR_OS_BLE_KEYBOARD_BOOT_ENABLED:
+        return "on";
+    case SOLAR_OS_BLE_KEYBOARD_BOOT_DISABLED:
+        return "off";
+    default:
+        return "unknown";
+    }
+}
+
+bool solar_os_ble_keyboard_parse_boot_setting(
+    const char *name,
+    solar_os_ble_keyboard_boot_setting_t *setting)
+{
+    if (name == NULL || setting == NULL) {
+        return false;
+    }
+    if (strcmp(name, "default") == 0) {
+        *setting = SOLAR_OS_BLE_KEYBOARD_BOOT_DEFAULT;
+        return true;
+    }
+    if (strcmp(name, "on") == 0 || strcmp(name, "enable") == 0 ||
+        strcmp(name, "enabled") == 0) {
+        *setting = SOLAR_OS_BLE_KEYBOARD_BOOT_ENABLED;
+        return true;
+    }
+    if (strcmp(name, "off") == 0 || strcmp(name, "disable") == 0 ||
+        strcmp(name, "disabled") == 0) {
+        *setting = SOLAR_OS_BLE_KEYBOARD_BOOT_DISABLED;
+        return true;
+    }
+    return false;
+}
+
+esp_err_t solar_os_ble_keyboard_set_boot_setting(
+    solar_os_ble_keyboard_boot_setting_t setting)
+{
+    if (setting != SOLAR_OS_BLE_KEYBOARD_BOOT_DEFAULT &&
+        setting != SOLAR_OS_BLE_KEYBOARD_BOOT_ENABLED &&
+        setting != SOLAR_OS_BLE_KEYBOARD_BOOT_DISABLED) {
+        return ESP_ERR_INVALID_ARG;
+    }
     ESP_RETURN_ON_ERROR(init_nvs(), TAG, "nvs init failed");
     (void)solar_os_ble_keyboard_enabled_for_current_boot();
 
@@ -258,16 +308,35 @@ esp_err_t solar_os_ble_keyboard_set_enabled_for_next_boot(bool enabled)
         return ret;
     }
 
-    ret = nvs_set_u8(nvs, BLE_KEYBOARD_NVS_ENABLED_KEY, enabled ? 1U : 0U);
+    if (setting == SOLAR_OS_BLE_KEYBOARD_BOOT_DEFAULT) {
+        ret = nvs_erase_key(nvs, BLE_KEYBOARD_NVS_ENABLED_KEY);
+        if (ret == ESP_ERR_NVS_NOT_FOUND) {
+            ret = ESP_OK;
+        }
+    } else {
+        ret = nvs_set_u8(nvs,
+                         BLE_KEYBOARD_NVS_ENABLED_KEY,
+                         setting == SOLAR_OS_BLE_KEYBOARD_BOOT_ENABLED ? 1U : 0U);
+    }
     if (ret == ESP_OK) {
         ret = nvs_commit(nvs);
     }
     nvs_close(nvs);
 
     if (ret == ESP_OK) {
-        enabled_for_next_boot = enabled;
+        next_boot_setting = setting;
+        enabled_for_next_boot = setting == SOLAR_OS_BLE_KEYBOARD_BOOT_DEFAULT
+                                    ? solar_os_ble_keyboard_board_default_enabled()
+                                    : setting == SOLAR_OS_BLE_KEYBOARD_BOOT_ENABLED;
     }
     return ret;
+}
+
+esp_err_t solar_os_ble_keyboard_set_enabled_for_next_boot(bool enabled)
+{
+    return solar_os_ble_keyboard_set_boot_setting(
+        enabled ? SOLAR_OS_BLE_KEYBOARD_BOOT_ENABLED
+                : SOLAR_OS_BLE_KEYBOARD_BOOT_DISABLED);
 }
 
 esp_err_t solar_os_ble_keyboard_apply_boot_policy(void)
@@ -810,8 +879,8 @@ static esp_err_t load_keyboard_layout(void)
         return ESP_ERR_INVALID_ARG;
     }
 
-    keyboard_layout = (solar_os_ble_keyboard_layout_t)value;
-    return ESP_OK;
+    return solar_os_input_set_keyboard_layout(
+        (solar_os_input_keyboard_layout_t)value);
 }
 
 static esp_err_t save_keyboard_layout(solar_os_ble_keyboard_layout_t layout)
@@ -1296,7 +1365,6 @@ esp_err_t solar_os_ble_keyboard_set_layout(solar_os_ble_keyboard_layout_t layout
     if (ret != ESP_OK) {
         return ret;
     }
-    keyboard_layout = layout;
     /* Keep the legacy key synchronized for downgrade compatibility. */
     return save_keyboard_layout(layout);
 }
@@ -1369,29 +1437,6 @@ static const char *addr_type_name(esp_ble_addr_type_t addr_type)
     }
 }
 
-static bool contains_ci(const char *haystack, const char *needle)
-{
-    const size_t needle_len = strlen(needle);
-
-    if (needle_len == 0) {
-        return true;
-    }
-
-    for (const char *h = haystack; *h != '\0'; h++) {
-        size_t i = 0;
-        while (i < needle_len && h[i] != '\0' &&
-               (char)tolower((unsigned char)h[i]) == needle[i]) {
-            i++;
-        }
-
-        if (i == needle_len) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
 static bool adv_has_uuid16(uint8_t *adv_data, uint16_t adv_len, esp_ble_adv_data_type type, uint16_t uuid)
 {
     uint8_t uuid_len = 0;
@@ -1444,17 +1489,6 @@ static void adv_name(uint8_t *adv_data, uint16_t adv_len, char *name, size_t nam
     const size_t copy_len = raw_len < (name_len - 1) ? raw_len : (name_len - 1);
     memcpy(name, raw_name, copy_len);
     name[copy_len] = '\0';
-}
-
-static bool is_keyboard_like(uint16_t appearance, const char *name)
-{
-    if (appearance == ESP_HID_APPEARANCE_KEYBOARD) {
-        return true;
-    }
-
-    return contains_ci(name, "keyboard") ||
-           contains_ci(name, "kbd") ||
-           contains_ci(name, "keychron");
 }
 
 static solar_os_ble_keyboard_scan_result_t *scan_result_slot(const uint8_t *bda)
@@ -1548,7 +1582,8 @@ static void consider_candidate(const esp_ble_gap_cb_param_t *param)
 
     adv_name(adv_data, adv_len, name, sizeof(name));
 
-    const bool keyboard_like = is_keyboard_like(appearance, name);
+    const bool keyboard_like = appearance == ESP_HID_APPEARANCE_KEYBOARD ||
+        solar_os_ble_keyboard_scan_name_is_keyboard_like(name);
     if (active_scan_mode == BLE_KEYBOARD_SCAN_DISCOVERY) {
         collect_scan_result(param->scan_rst.bda,
                             param->scan_rst.ble_addr_type,
@@ -1559,18 +1594,14 @@ static void consider_candidate(const esp_ble_gap_cb_param_t *param)
                             name);
     }
 
-    if (!has_hid_service && !keyboard_like) {
+    if (!solar_os_ble_keyboard_scan_candidate_should_replace(
+            candidate.valid,
+            candidate.keyboard_like,
+            candidate.rssi,
+            has_hid_service,
+            keyboard_like,
+            param->scan_rst.rssi)) {
         return;
-    }
-
-    if (candidate.valid) {
-        if (candidate.keyboard_like && !keyboard_like) {
-            return;
-        }
-        if (candidate.keyboard_like == keyboard_like &&
-            param->scan_rst.rssi <= candidate.rssi) {
-            return;
-        }
     }
 
     candidate.valid = true;
@@ -1628,383 +1659,6 @@ static bool key_in_report(uint8_t key, const uint8_t *keys)
     return false;
 }
 
-static char shifted_digit(uint8_t keycode)
-{
-    static const char shifted[] = {
-        [0x1e - 0x1e] = '!',
-        [0x1f - 0x1e] = '@',
-        [0x20 - 0x1e] = '#',
-        [0x21 - 0x1e] = '$',
-        [0x22 - 0x1e] = '%',
-        [0x23 - 0x1e] = '^',
-        [0x24 - 0x1e] = '&',
-        [0x25 - 0x1e] = '*',
-        [0x26 - 0x1e] = '(',
-        [0x27 - 0x1e] = ')',
-    };
-
-    return shifted[keycode - 0x1e];
-}
-
-static char unshifted_digit(uint8_t keycode)
-{
-    return keycode == 0x27 ? '0' : (char)('1' + (keycode - 0x1e));
-}
-
-static char hid_keycode_to_char_us(uint8_t keycode, bool shift)
-{
-    if (keycode >= 0x04 && keycode <= 0x1d) {
-        const bool upper = shift ^ caps_lock;
-        return (char)((upper ? 'A' : 'a') + (keycode - 0x04));
-    }
-
-    if (keycode >= 0x1e && keycode <= 0x27) {
-        return shift ? shifted_digit(keycode) : unshifted_digit(keycode);
-    }
-
-    switch (keycode) {
-    case 0x29:
-        return SOLAR_OS_KEY_ESCAPE;
-    case 0x28:
-        return '\n';
-    case 0x2a:
-        return '\b';
-    case 0x2b:
-        return '\t';
-    case 0x2c:
-        return ' ';
-    case 0x2d:
-        return shift ? '_' : '-';
-    case 0x2e:
-        return shift ? '+' : '=';
-    case 0x2f:
-        return shift ? '{' : '[';
-    case 0x30:
-        return shift ? '}' : ']';
-    case 0x31:
-        return shift ? '|' : '\\';
-    case 0x32:
-        return shift ? '~' : '#';
-    case 0x33:
-        return shift ? ':' : ';';
-    case 0x34:
-        return shift ? '"' : '\'';
-    case 0x35:
-        return shift ? '~' : '`';
-    case 0x36:
-        return shift ? '<' : ',';
-    case 0x37:
-        return shift ? '>' : '.';
-    case 0x38:
-        return shift ? '?' : '/';
-    case 0x4b:
-        return SOLAR_OS_KEY_PAGE_UP;
-    case 0x4e:
-        return SOLAR_OS_KEY_PAGE_DOWN;
-    case 0x4f:
-        return SOLAR_OS_KEY_RIGHT;
-    case 0x50:
-        return SOLAR_OS_KEY_LEFT;
-    case 0x51:
-        return SOLAR_OS_KEY_DOWN;
-    case 0x52:
-        return SOLAR_OS_KEY_UP;
-    default:
-        return '\0';
-    }
-}
-
-static char hid_keycode_to_char_de(uint8_t keycode, uint8_t modifiers)
-{
-    const bool shift = (modifiers & HID_MOD_SHIFT) != 0;
-    const bool altgr = (modifiers & 0x40) != 0;
-
-    if (altgr) {
-        switch (keycode) {
-        case 0x14:
-            return '@';
-        case 0x24:
-            return '{';
-        case 0x25:
-            return '[';
-        case 0x26:
-            return ']';
-        case 0x27:
-            return '}';
-        case 0x2d:
-            return '\\';
-        case 0x30:
-            return '~';
-        case 0x64:
-            return '|';
-        default:
-            return '\0';
-        }
-    }
-
-    if (keycode >= 0x04 && keycode <= 0x1d) {
-        const bool upper = shift ^ caps_lock;
-        char base = (char)('a' + (keycode - 0x04));
-        if (base == 'y') {
-            base = 'z';
-        } else if (base == 'z') {
-            base = 'y';
-        }
-        return upper ? (char)toupper((unsigned char)base) : base;
-    }
-
-    if (keycode >= 0x1e && keycode <= 0x27) {
-        static const char shifted[] = {
-            [0x1e - 0x1e] = '!',
-            [0x1f - 0x1e] = '"',
-            [0x20 - 0x1e] = '#',
-            [0x21 - 0x1e] = '$',
-            [0x22 - 0x1e] = '%',
-            [0x23 - 0x1e] = '&',
-            [0x24 - 0x1e] = '/',
-            [0x25 - 0x1e] = '(',
-            [0x26 - 0x1e] = ')',
-            [0x27 - 0x1e] = '=',
-        };
-        return shift ? shifted[keycode - 0x1e] : unshifted_digit(keycode);
-    }
-
-    switch (keycode) {
-    case 0x29:
-        return SOLAR_OS_KEY_ESCAPE;
-    case 0x28:
-        return '\n';
-    case 0x2a:
-        return '\b';
-    case 0x2b:
-        return '\t';
-    case 0x2c:
-        return ' ';
-    case 0x2d:
-        return shift ? '?' : LATIN1_SHARP_S;
-    case 0x2e:
-        return shift ? '`' : '\0';
-    case 0x2f:
-        return shift ? LATIN1_U_UMLAUT_UPPER : LATIN1_U_UMLAUT_LOWER;
-    case 0x30:
-        return shift ? '*' : '+';
-    case 0x31:
-        return shift ? '\'' : '#';
-    case 0x32:
-        return shift ? '\'' : '#';
-    case 0x33:
-        return shift ? LATIN1_O_UMLAUT_UPPER : LATIN1_O_UMLAUT_LOWER;
-    case 0x34:
-        return shift ? LATIN1_A_UMLAUT_UPPER : LATIN1_A_UMLAUT_LOWER;
-    case 0x35:
-        return shift ? '\0' : '^';
-    case 0x36:
-        return shift ? ';' : ',';
-    case 0x37:
-        return shift ? ':' : '.';
-    case 0x38:
-        return shift ? '_' : '-';
-    case 0x4b:
-        return SOLAR_OS_KEY_PAGE_UP;
-    case 0x4e:
-        return SOLAR_OS_KEY_PAGE_DOWN;
-    case 0x4f:
-        return SOLAR_OS_KEY_RIGHT;
-    case 0x50:
-        return SOLAR_OS_KEY_LEFT;
-    case 0x51:
-        return SOLAR_OS_KEY_DOWN;
-    case 0x52:
-        return SOLAR_OS_KEY_UP;
-    case 0x64:
-        return shift ? '>' : '<';
-    default:
-        return '\0';
-    }
-}
-
-static char hid_keycode_to_function_key(uint8_t keycode)
-{
-    switch (keycode) {
-    case 0x3a:
-        return SOLAR_OS_KEY_F1;
-    case 0x3b:
-        return SOLAR_OS_KEY_F2;
-    case 0x3c:
-        return SOLAR_OS_KEY_F3;
-    case 0x3d:
-        return SOLAR_OS_KEY_F4;
-    case 0x3e:
-        return SOLAR_OS_KEY_F5;
-    case 0x3f:
-        return SOLAR_OS_KEY_F6;
-    case 0x40:
-        return SOLAR_OS_KEY_F7;
-    case 0x41:
-        return SOLAR_OS_KEY_F8;
-    case 0x42:
-        return SOLAR_OS_KEY_F9;
-    case 0x43:
-        return SOLAR_OS_KEY_F10;
-    case 0x44:
-        return SOLAR_OS_KEY_F11;
-    case 0x45:
-        return SOLAR_OS_KEY_F12;
-    default:
-        return '\0';
-    }
-}
-
-static char hid_keycode_to_nav_key(uint8_t keycode, uint8_t modifiers)
-{
-    const bool ctrl = (modifiers & HID_MOD_CTRL) != 0;
-    const bool shift = (modifiers & HID_MOD_SHIFT) != 0;
-
-    switch (keycode) {
-    case 0x4a:
-        if (ctrl && shift) {
-            return SOLAR_OS_KEY_CTRL_SHIFT_HOME;
-        }
-        if (ctrl) {
-            return SOLAR_OS_KEY_CTRL_HOME;
-        }
-        return shift ? SOLAR_OS_KEY_SHIFT_HOME : SOLAR_OS_KEY_HOME;
-    case 0x4b:
-        return shift ? SOLAR_OS_KEY_SHIFT_PAGE_UP : SOLAR_OS_KEY_PAGE_UP;
-    case 0x4c:
-        return SOLAR_OS_KEY_DELETE;
-    case 0x4d:
-        if (ctrl && shift) {
-            return SOLAR_OS_KEY_CTRL_SHIFT_END;
-        }
-        if (ctrl) {
-            return SOLAR_OS_KEY_CTRL_END;
-        }
-        return shift ? SOLAR_OS_KEY_SHIFT_END : SOLAR_OS_KEY_END;
-    case 0x4e:
-        return shift ? SOLAR_OS_KEY_SHIFT_PAGE_DOWN : SOLAR_OS_KEY_PAGE_DOWN;
-    case 0x4f:
-        if (ctrl && shift) {
-            return SOLAR_OS_KEY_CTRL_SHIFT_RIGHT;
-        }
-        if (ctrl) {
-            return SOLAR_OS_KEY_CTRL_RIGHT;
-        }
-        return shift ? SOLAR_OS_KEY_SHIFT_RIGHT : SOLAR_OS_KEY_RIGHT;
-    case 0x50:
-        if (ctrl && shift) {
-            return SOLAR_OS_KEY_CTRL_SHIFT_LEFT;
-        }
-        if (ctrl) {
-            return SOLAR_OS_KEY_CTRL_LEFT;
-        }
-        return shift ? SOLAR_OS_KEY_SHIFT_LEFT : SOLAR_OS_KEY_LEFT;
-    case 0x51:
-        if (ctrl && shift) {
-            return SOLAR_OS_KEY_CTRL_SHIFT_DOWN;
-        }
-        if (ctrl) {
-            return SOLAR_OS_KEY_CTRL_DOWN;
-        }
-        return shift ? SOLAR_OS_KEY_SHIFT_DOWN : SOLAR_OS_KEY_DOWN;
-    case 0x52:
-        if (ctrl && shift) {
-            return SOLAR_OS_KEY_CTRL_SHIFT_UP;
-        }
-        if (ctrl) {
-            return SOLAR_OS_KEY_CTRL_UP;
-        }
-        return shift ? SOLAR_OS_KEY_SHIFT_UP : SOLAR_OS_KEY_UP;
-    default:
-        return '\0';
-    }
-}
-
-static char hid_keycode_to_control_char(uint8_t keycode)
-{
-    if (keycode >= 0x04 && keycode <= 0x1d) {
-        char base = (char)('a' + (keycode - 0x04));
-        if (keyboard_layout == SOLAR_OS_BLE_KEYBOARD_LAYOUT_DE) {
-            if (base == 'y') {
-                base = 'z';
-            } else if (base == 'z') {
-                base = 'y';
-            }
-        }
-        return (char)(base - 'a' + 1);
-    }
-
-    switch (keycode) {
-    case 0x23:
-        return 0x1e;
-    case 0x2d:
-        return 0x1f;
-    case 0x30:
-        return 0x1d;
-    case 0x31:
-        return 0x1c;
-    default:
-        return '\0';
-    }
-}
-
-static char hid_keycode_to_system_key(uint8_t keycode, uint8_t modifiers)
-{
-    const bool ctrl = (modifiers & HID_MOD_CTRL) != 0;
-    const bool alt = (modifiers & HID_MOD_ALT) != 0;
-
-    if (ctrl && alt && keycode == 0x4c) {
-        SOLAR_OS_LOGI(TAG, "mapped CTRL+ALT+DEL to app-exit key");
-        return (char)SOLAR_OS_KEY_APP_EXIT;
-    }
-    if (ctrl && !alt) {
-        if (keyboard_layout != SOLAR_OS_BLE_KEYBOARD_LAYOUT_DE && keycode == 0x30) {
-            SOLAR_OS_LOGI(TAG, "mapped CTRL+] to app-exit key");
-            return (char)SOLAR_OS_KEY_APP_EXIT;
-        }
-        if (keycode == 0x2e ||
-            (keyboard_layout == SOLAR_OS_BLE_KEYBOARD_LAYOUT_DE && keycode == 0x30)) {
-            return (char)SOLAR_OS_KEY_CTRL_PLUS;
-        }
-        if (keyboard_layout == SOLAR_OS_BLE_KEYBOARD_LAYOUT_DE && keycode == 0x38) {
-            return 0x1f;
-        }
-    }
-
-    return '\0';
-}
-
-static char __attribute__((unused)) hid_keycode_to_char(uint8_t keycode,
-                                                        uint8_t modifiers)
-{
-    const bool shift = (modifiers & HID_MOD_SHIFT) != 0;
-    const char system_key = hid_keycode_to_system_key(keycode, modifiers);
-    const char function_key = hid_keycode_to_function_key(keycode);
-    const char nav_key = hid_keycode_to_nav_key(keycode, modifiers);
-
-    if (system_key != '\0') {
-        return system_key;
-    }
-    if (function_key != '\0') {
-        return function_key;
-    }
-    if (nav_key != '\0') {
-        return nav_key;
-    }
-    if ((modifiers & HID_MOD_CTRL) != 0) {
-        const char control = hid_keycode_to_control_char(keycode);
-        if (control != '\0') {
-            return control;
-        }
-    }
-
-    if (keyboard_layout == SOLAR_OS_BLE_KEYBOARD_LAYOUT_DE) {
-        return hid_keycode_to_char_de(keycode, modifiers);
-    }
-
-    return hid_keycode_to_char_us(keycode, shift);
-}
-
 static void keyboard_report_state_publish(uint8_t modifiers, const uint8_t *keys)
 {
     solar_os_ble_keyboard_key_state_t next = {
@@ -2050,6 +1704,23 @@ static void handle_keyboard_report(uint8_t map_index,
         return;
     }
 
+    const uint8_t changed_modifiers = (uint8_t)(previous_modifiers ^ modifiers);
+    for (uint8_t bit = 0U; bit < 8U; bit++) {
+        const uint8_t mask = (uint8_t)(1U << bit);
+        if ((changed_modifiers & mask) == 0U) {
+            continue;
+        }
+        const uint16_t usage = (uint16_t)(0xe0U + bit);
+        (void)solar_os_input_write_key(
+            input_source,
+            usage,
+            usage,
+            0U,
+            modifiers,
+            (modifiers & mask) != 0U ? SOLAR_OS_INPUT_KEY_PRESS :
+                                      SOLAR_OS_INPUT_KEY_RELEASE);
+    }
+
     for (size_t i = 0; i < BLE_KEYBOARD_MAX_KEYS; i++) {
         const uint8_t key = previous_keys[i];
         if (key == 0 || key_in_report(key, keys)) {
@@ -2081,7 +1752,6 @@ static void handle_keyboard_report(uint8_t map_index,
                                            SOLAR_OS_INPUT_KEY_PRESS);
     }
 
-    keyboard_layout = (solar_os_ble_keyboard_layout_t)solar_os_input_keyboard_layout();
     keyboard_report_state_publish(modifiers, keys);
     memcpy(previous_keys, keys, sizeof(previous_keys));
     previous_modifiers = modifiers;

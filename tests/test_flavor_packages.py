@@ -26,37 +26,197 @@ class FlavorPackagesTest(unittest.TestCase):
             self.catalog,
         )
 
-    def test_invaders_disabled_in_all_flavors(self):
-        for flavor_path in sorted((REPOSITORY / "flavors").glob("*.toml")):
-            _, _, groups, packages = self.resolve(flavor_path.stem)
-            self.assertFalse(groups["games"], flavor_path.stem)
-            self.assertFalse(packages["app_invaders"], flavor_path.stem)
+    def test_games_are_only_in_full(self):
+        built_in_flavors = ("core", "full", "netrunner", "rover", "writerdeck")
+        for flavor in built_in_flavors:
+            _, _, groups, packages = self.resolve(flavor)
+            expected = flavor == "full"
+            self.assertEqual(groups["gameboy"], expected, flavor)
+            self.assertEqual(packages["app_invaders"], expected,
+                             flavor)
+            self.assertEqual(packages["app_gameboy"], expected,
+                             flavor)
+
+    def test_update_layout_adds_ota_without_exposing_it_in_flavor(self):
+        _, _, _, packages = self.resolve("core")
+        single = generate_flavor_config.apply_update_layout(
+            self.catalog, packages, "single"
+        )
+        ota = generate_flavor_config.apply_update_layout(
+            self.catalog, packages, "ota"
+        )
+        self.assertFalse(single["service_ota"])
+        self.assertTrue(ota["service_ota"])
+        self.assertTrue(ota["service_http_client"])
+        with self.assertRaisesRegex(ValueError, "unknown update layout"):
+            generate_flavor_config.apply_update_layout(
+                self.catalog, packages, "unknown"
+            )
+
+    def test_sketch_is_media_without_pointer_or_psram_gates(self):
+        _, _, groups, packages = self.resolve("full")
+        self.assertTrue(groups["sketch"])
+        self.assertTrue(packages["app_sketch"])
+
+        pruned_groups, pruned_packages = (
+            generate_flavor_config.apply_board_capability_pruning(
+                self.catalog,
+                groups,
+                packages,
+                {"gfx"},
+            )
+        )
+        self.assertTrue(pruned_groups["sketch"])
+        self.assertTrue(pruned_packages["app_sketch"])
+        self.assertFalse(pruned_packages["app_view"])
+
+    def test_board_required_package_enables_dependencies(self):
+        _, _, _, packages = self.resolve("core")
+        enabled = generate_flavor_config.enable_required_packages(
+            self.catalog,
+            packages,
+            {"job_ps2_keyboard"},
+        )
+
+        self.assertTrue(enabled["job_ps2_keyboard"])
+        self.assertTrue(enabled["service_ps2"])
+        self.assertTrue(enabled["service_resources"])
+
+    def test_unknown_board_required_package_is_rejected(self):
+        _, _, _, packages = self.resolve("core")
+        with self.assertRaisesRegex(ValueError, "unknown board-required package"):
+            generate_flavor_config.enable_required_packages(
+                self.catalog,
+                packages,
+                {"job_missing"},
+            )
+
+    def test_target_pruning_keeps_compatible_driver_packages(self):
+        _, _, _, packages = self.resolve("full")
+
+        for target in ("esp32", "esp32s3"):
+            pruned = generate_flavor_config.apply_target_pruning(
+                self.catalog,
+                packages,
+                target,
+            )
+            self.assertTrue(pruned["expansion_neopixel"], target)
+            self.assertTrue(pruned["expansion_audio_pwm"], target)
+            self.assertTrue(pruned["expansion_pcm1808"], target)
+            self.assertTrue(pruned["expansion_pcm5102"], target)
+            self.assertTrue(pruned["driver_pcf85063"], target)
+            self.assertTrue(pruned["driver_shtc3"], target)
+            self.assertTrue(pruned["driver_battery_adc"], target)
+            self.assertTrue(pruned["expansion_sdmmc"], target)
+
+    def test_target_pruning_removes_incompatible_driver_and_dependents(self):
+        _, _, _, packages = self.resolve("full")
+        pruned = generate_flavor_config.apply_target_pruning(
+            self.catalog,
+            packages,
+            "esp32c3",
+        )
+
+        self.assertFalse(pruned["expansion_neopixel"])
+        self.assertFalse(pruned["expansion_audio_pwm"])
+        self.assertFalse(pruned["expansion_pcm1808"])
+        self.assertFalse(pruned["expansion_pcm5102"])
+
+    def test_sdmmc_expansion_uses_direct_gpio_capability(self):
+        _, _, groups, packages = self.resolve("full")
+        _, pruned = generate_flavor_config.apply_board_capability_pruning(
+            self.catalog,
+            groups,
+            packages,
+            {"expansion_gpio"},
+        )
+
+        self.assertTrue(pruned["expansion_sdmmc"])
+        self.assertFalse(pruned["expansion_sdspi"])
+
+    def test_audio_backend_drivers_are_target_specific(self):
+        _, _, _, packages = self.resolve("full")
+
+        classic = generate_flavor_config.apply_target_pruning(
+            self.catalog,
+            packages,
+            "esp32",
+        )
+        self.assertTrue(classic["driver_audio_esp32_dac"])
+        self.assertFalse(classic["driver_audio_es8311_codecs"])
+
+        s3 = generate_flavor_config.apply_target_pruning(
+            self.catalog,
+            packages,
+            "esp32s3",
+        )
+        self.assertFalse(s3["driver_audio_esp32_dac"])
+        self.assertTrue(s3["driver_audio_es8311_codecs"])
+
+    def test_spi_display_drivers_support_both_esp32_targets(self):
+        _, _, _, packages = self.resolve("full")
+
+        portable_spi_displays = (
+            "driver_display_st7305",
+            "driver_display_ili9341",
+            "driver_display_st7796",
+            "expansion_ssd1683",
+        )
+
+        classic = generate_flavor_config.apply_target_pruning(
+            self.catalog,
+            packages,
+            "esp32",
+        )
+        for package in portable_spi_displays:
+            self.assertTrue(classic[package], package)
+        self.assertTrue(classic["driver_display_cvbs_pal"])
+        self.assertTrue(classic["driver_display_vga32"])
+
+        s3 = generate_flavor_config.apply_target_pruning(
+            self.catalog,
+            packages,
+            "esp32s3",
+        )
+        for package in portable_spi_displays:
+            self.assertTrue(s3[package], package)
+        self.assertFalse(s3["driver_display_cvbs_pal"])
+        self.assertFalse(s3["driver_display_vga32"])
+
+    def test_target_pruning_requires_a_target(self):
+        _, _, _, packages = self.resolve("full")
+        with self.assertRaisesRegex(ValueError, "MCU target is required"):
+            generate_flavor_config.apply_target_pruning(
+                self.catalog,
+                packages,
+                "",
+            )
 
     def test_granular_group_ownership(self):
         self.assertEqual(
-            set(self.catalog.group_defs["maintenance_jobs"].members),
-            {"job_log", "job_batmon"},
+            self.catalog.group_defs["ssh"].members,
+            ("app_ssh", "app_scp"),
         )
         self.assertEqual(
-            set(self.catalog.group_defs["hardware_jobs"].members),
-            {"job_bridge", "job_daq", "job_gpio_keys", "job_ps2_keyboard", "job_sump"},
+            self.catalog.group_defs["ftp"].members,
+            ("app_ftp", "job_ftpd"),
         )
         self.assertEqual(
-            set(self.catalog.group_defs["writing"].members),
-            {"app_reader", "app_writer", "app_files", "app_notes"},
+            self.catalog.group_defs["meshcore"].members,
+            ("job_meshcore",),
         )
         self.assertEqual(
-            set(self.catalog.group_defs["utils"].members),
-            {"app_clock", "app_calc", "app_plot", "app_logic", "app_sheet"},
+            self.catalog.group_defs["gameboy"].members,
+            ("app_gameboy",),
         )
         self.assertEqual(
-            set(self.catalog.group_defs["retro"].members),
-            {"app_gameboy"},
+            self.catalog.group_defs["pcm1808"].members,
+            ("expansion_pcm1808",),
         )
-        self.assertIn("service_synth", self.catalog.group_defs["system"].members)
-        self.assertIn("service_streams", self.catalog.group_defs["system"].members)
-        self.assertIn("job_controls", self.catalog.group_defs["system"].members)
-        self.assertIn("service_synth", self.catalog.group_defs["audio"].members)
+        self.assertEqual(self.catalog.group_defs["usb_hid"].members, ("service_hid",))
+        self.assertTrue(self.catalog.group_defs["usb_hid"].hidden)
+        self.assertTrue(self.catalog.group_defs["bootstrap"].hidden)
+        self.assertEqual(self.catalog.group_defs["ssh"].category, "Networking")
         self.assertEqual(
             self.catalog.package_defs["service_synth"].depends,
             ("service_audio", "service_dsp", "service_streams"),
@@ -133,6 +293,14 @@ class FlavorPackagesTest(unittest.TestCase):
             ("expansion_pwm",),
         )
         self.assertEqual(
+            self.catalog.package_defs["expansion_pcm1808"].depends,
+            ("service_audio", "service_expansion"),
+        )
+        self.assertEqual(
+            self.catalog.package_defs["expansion_pcm1808"].capabilities,
+            ("expansion_i2s",),
+        )
+        self.assertEqual(
             self.catalog.package_defs["expansion_pcm5102"].depends,
             ("service_audio", "service_expansion"),
         )
@@ -141,10 +309,30 @@ class FlavorPackagesTest(unittest.TestCase):
             ("expansion_i2s",),
         )
         self.assertEqual(
+            self.catalog.package_defs["expansion_ssd1683"].depends,
+            ("service_expansion", "service_spi"),
+        )
+        self.assertEqual(
+            self.catalog.package_defs["expansion_ssd1683"].capabilities,
+            ("gfx", "expansion_gpio"),
+        )
+        self.assertEqual(
             self.catalog.package_defs["service_espnow"].depends,
             ("service_wifi",),
         )
-        self.assertIn("service_wireguard", self.catalog.group_defs["net"].members)
+        self.assertEqual(
+            self.catalog.group_defs["wireguard"].members,
+            ("service_wireguard",),
+        )
+        self.assertEqual(self.catalog.group_defs["osc"].members, ("job_osc",))
+        self.assertEqual(
+            self.catalog.package_defs["service_osc"].depends,
+            ("service_controls", "service_streams"),
+        )
+        self.assertEqual(
+            self.catalog.package_defs["job_osc"].depends,
+            ("service_net", "service_osc"),
+        )
         self.assertEqual(
             self.catalog.package_defs["service_wireguard"].depends,
             ("service_wifi",),
@@ -174,10 +362,10 @@ class FlavorPackagesTest(unittest.TestCase):
         name, _, groups, packages = self.resolve("writerdeck")
 
         self.assertEqual(name, "writerdeck")
-        self.assertTrue(groups["writing"])
-        self.assertTrue(groups["maintenance_jobs"])
-        self.assertFalse(groups["hardware_jobs"])
-        self.assertFalse(groups["utils"])
+        self.assertTrue(groups["writer"])
+        self.assertTrue(groups["logging"])
+        self.assertFalse(groups["bridge"])
+        self.assertFalse(groups["clock"])
         for package in ("app_reader", "app_writer", "app_files", "app_notes", "job_log"):
             self.assertTrue(packages[package], package)
         self.assertTrue(packages["job_controls"])
@@ -217,10 +405,15 @@ class FlavorPackagesTest(unittest.TestCase):
             "app_funcgen",
         ):
             self.assertTrue(pruned[package], package)
-        self.assertFalse(pruned["service_audio_board"])
         self.assertFalse(pruned["service_espnow"])
         self.assertFalse(pruned["service_wireguard"])
         self.assertFalse(pruned["job_espnow_link"])
+
+    def test_standard_flavors_do_not_select_dormant_hid(self):
+        for flavor in ("core", "full", "netrunner", "rover", "writerdeck"):
+            _, _, groups, packages = self.resolve(flavor)
+            self.assertFalse(groups["usb_hid"], flavor)
+            self.assertFalse(packages["service_hid"], flavor)
 
     def test_webradio_survives_on_wifi_board_without_builtin_audio(self):
         _, _, groups, packages = self.resolve("full")
@@ -246,7 +439,6 @@ class FlavorPackagesTest(unittest.TestCase):
             "job_espnow_link",
         ):
             self.assertTrue(pruned[package], package)
-        self.assertFalse(pruned["service_audio_board"])
 
     def test_pwm_audio_expansion_survives_without_builtin_audio(self):
         _, _, groups, packages = self.resolve("full")
@@ -268,7 +460,6 @@ class FlavorPackagesTest(unittest.TestCase):
             "app_funcgen",
         ):
             self.assertTrue(pruned[package], package)
-        self.assertFalse(pruned["service_audio_board"])
 
     def test_pcm5102_expansion_survives_without_builtin_audio(self):
         _, _, groups, packages = self.resolve("full")
@@ -290,7 +481,35 @@ class FlavorPackagesTest(unittest.TestCase):
             "app_funcgen",
         ):
             self.assertTrue(pruned[package], package)
-        self.assertFalse(pruned["service_audio_board"])
+
+    def test_pcm1808_expansion_survives_without_builtin_audio(self):
+        _, _, groups, packages = self.resolve("full")
+        _, pruned = generate_flavor_config.apply_board_capability_pruning(
+            self.catalog,
+            groups,
+            packages,
+            {"expansion_i2s"},
+        )
+
+        for package in (
+            "service_audio",
+            "service_expansion",
+            "expansion_pcm1808",
+            "app_arecord",
+            "app_recorder",
+        ):
+            self.assertTrue(pruned[package], package)
+
+    def test_pcm1808_expansion_is_pruned_without_i2s_capability(self):
+        _, _, groups, packages = self.resolve("full")
+        _, pruned = generate_flavor_config.apply_board_capability_pruning(
+            self.catalog,
+            groups,
+            packages,
+            {"expansion_gpio"},
+        )
+
+        self.assertFalse(pruned["expansion_pcm1808"])
 
     def test_pcm5102_expansion_is_pruned_without_i2s_capability(self):
         _, _, groups, packages = self.resolve("full")
@@ -303,258 +522,91 @@ class FlavorPackagesTest(unittest.TestCase):
 
         self.assertFalse(pruned["expansion_pcm5102"])
 
-    def test_rover_flavors_share_an_expansion_capable_baseline(self):
+    def test_audio_backend_expansions_do_not_require_builtin_audio(self):
+        _, _, groups, packages = self.resolve("full")
+
+        _, s3 = generate_flavor_config.apply_board_capability_pruning(
+            self.catalog,
+            groups,
+            packages,
+            {"i2c", "expansion_i2s"},
+        )
+        self.assertTrue(s3["driver_audio_es8311_codecs"])
+
+        _, classic = generate_flavor_config.apply_board_capability_pruning(
+            self.catalog,
+            groups,
+            packages,
+            {"expansion_gpio"},
+        )
+        self.assertTrue(classic["driver_audio_esp32_dac"])
+
+    def test_rover_is_an_expansion_capable_baseline(self):
         rover_name, _, rover_groups, rover_packages = self.resolve("rover")
-        python_name, _, python_groups, python_packages = self.resolve("rover-python")
-        lua_name, _, lua_groups, lua_packages = self.resolve("rover-lua")
 
         self.assertEqual(rover_name, "rover")
-        self.assertEqual(python_name, "rover-python")
-        self.assertEqual(lua_name, "rover-lua")
-        for groups in (rover_groups, python_groups, lua_groups):
-            self.assertTrue(groups["system"])
-            self.assertTrue(groups["expansions"])
-            self.assertFalse(groups["maintenance_apps"])
-            self.assertFalse(groups["maintenance_jobs"])
-            self.assertFalse(groups["hardware_jobs"])
-            self.assertFalse(groups["audio"])
-            self.assertFalse(groups["agent"])
-            self.assertTrue(groups["net"])
-            self.assertTrue(groups["media"])
-            self.assertTrue(groups["utils"])
-        self.assertTrue(rover_groups["writing"])
-        # The effective group remains visible because app_files is an explicit
-        # writing-group trigger; the other writing packages stay disabled.
-        self.assertTrue(python_groups["writing"])
-        self.assertTrue(lua_groups["writing"])
-        for packages in (rover_packages, python_packages, lua_packages):
-            self.assertTrue(packages["service_expansion"])
-            self.assertTrue(packages["app_files"])
-            self.assertFalse(packages["service_ota"])
-            self.assertFalse(packages["service_docs"])
-            self.assertTrue(packages["job_log"])
-            self.assertTrue(packages["job_bridge"])
-            self.assertFalse(packages["job_batmon"])
-            self.assertFalse(packages["job_daq"])
-            self.assertFalse(packages["job_sump"])
-            self.assertFalse(packages["app_agent"])
-            self.assertFalse(packages["app_logic"])
-            for audio_app in (
-                "app_aplay",
-                "app_arecord",
-                "app_recorder",
-                "app_player",
-                "app_synth",
-                "app_funcgen",
-            ):
-                self.assertFalse(packages[audio_app], audio_app)
-
-        self.assertFalse(rover_groups["games"])
+        self.assertTrue(rover_groups["hardware_shell"])
+        self.assertTrue(rover_groups["rfm69"])
+        self.assertTrue(rover_groups["meshcore"])
+        self.assertFalse(rover_groups["ota"])
+        self.assertTrue(rover_groups["logging"])
+        self.assertTrue(rover_groups["bridge"])
+        self.assertFalse(rover_groups["audio_commands"])
+        self.assertFalse(rover_groups["agent"])
+        self.assertTrue(rover_groups["ssh"])
+        self.assertTrue(rover_groups["image_viewer"])
+        self.assertTrue(rover_groups["clock"])
+        self.assertTrue(rover_groups["writer"])
+        self.assertTrue(rover_packages["service_expansion"])
+        self.assertTrue(rover_packages["app_files"])
+        self.assertFalse(rover_packages["service_ota"])
+        self.assertFalse(rover_packages["service_docs"])
+        self.assertTrue(rover_packages["job_log"])
+        self.assertTrue(rover_packages["job_bridge"])
+        self.assertFalse(rover_packages["job_batmon"])
+        self.assertFalse(rover_packages["job_daq"])
+        self.assertFalse(rover_packages["job_sump"])
+        self.assertFalse(rover_packages["app_agent"])
+        self.assertFalse(rover_packages["app_logic"])
+        self.assertFalse(rover_groups["gameboy"])
         self.assertFalse(rover_packages["app_invaders"])
+        self.assertFalse(rover_packages["app_gameboy"])
         self.assertFalse(rover_packages["app_python"])
         self.assertFalse(rover_packages["app_lua"])
-        self.assertFalse(python_groups["games"])
-        self.assertFalse(python_packages["app_invaders"])
-        self.assertTrue(python_groups["python"])
-        self.assertTrue(python_packages["app_python"])
-        self.assertFalse(python_packages["app_lua"])
-        self.assertFalse(lua_groups["games"])
-        self.assertFalse(lua_packages["app_invaders"])
-        self.assertTrue(lua_groups["lua"])
-        self.assertTrue(lua_packages["app_lua"])
-        self.assertFalse(lua_packages["app_python"])
-
-        python_difference = {
-            package
-            for package in rover_packages
-            if rover_packages[package] != python_packages[package]
-        }
-        lua_difference = {
-            package
-            for package in rover_packages
-            if rover_packages[package] != lua_packages[package]
-        }
-        self.assertEqual(
-            python_difference,
-            {
-                "service_playground",
-                "service_script_net",
-                "service_script_runner",
-                "app_python",
-                "app_playground",
-                "app_reader",
-                "app_writer",
-                "app_notes",
-            },
-        )
-        self.assertEqual(
-            lua_difference,
-            {
-                "service_playground",
-                "service_script_net",
-                "service_script_runner",
-                "app_lua",
-                "app_playground",
-                "app_reader",
-                "app_writer",
-                "app_notes",
-            },
-        )
-
-    def test_rover_synth_is_a_focused_ble_audio_expansion_flavor(self):
-        name, _, groups, packages = self.resolve("rover-synth")
-
-        self.assertEqual(name, "rover-synth")
-        for group in (
-            "system",
-            "expansions",
-            "maintenance_apps",
-            "maintenance_jobs",
-            "hardware_jobs",
-            "net",
-            "agent",
-            "media",
-            "games",
-            "retro",
-            "python",
-            "lua",
-            "utils",
-        ):
-            self.assertFalse(groups[group], group)
-
-        for package in (
-            "system_shell",
-            "service_ble",
-            "service_sd",
-            "service_audio",
-            "service_synth",
-            "service_controls",
-            "job_controls",
-            "service_expansion",
-            "expansion_audio_pwm",
-            "app_synth",
-            "job_midi",
-            "job_log",
-        ):
-            self.assertTrue(packages[package], package)
-
-        for package in (
-            "service_audio_board",
-            "service_wifi",
-            "service_radio",
-            "service_meshcore",
-            "app_funcgen",
-            "app_invaders",
-            "app_view",
-        ):
-            self.assertFalse(packages[package], package)
 
     def test_existing_flavors_preserve_hardware_job_selection(self):
         for flavor in ("core", "full", "netrunner"):
             with self.subTest(flavor=flavor):
                 _, _, groups, packages = self.resolve(flavor)
-                self.assertTrue(groups["hardware_jobs"])
+                self.assertTrue(groups["bridge"])
                 self.assertTrue(packages["job_bridge"])
                 self.assertTrue(packages["job_controls"])
                 self.assertTrue(packages["job_daq"])
                 self.assertTrue(packages["job_sump"])
 
         _, _, full_groups, full_packages = self.resolve("full")
-        self.assertTrue(full_groups["writing"])
+        self.assertTrue(full_groups["writer"])
         for package in ("app_reader", "app_writer", "app_files", "app_notes"):
             self.assertTrue(full_packages[package], package)
 
-    def test_retro_is_a_strict_superset_of_full(self):
-        _, _, full_groups, full_packages = self.resolve("full")
-        name, _, retro_groups, retro_packages = self.resolve("retro")
+    def test_gameboy_requires_a_streaming_display(self):
+        _, _, groups, packages = self.resolve("full")
+        _, pruned = generate_flavor_config.apply_board_capability_pruning(
+            self.catalog,
+            groups,
+            packages,
+            {"gfx", "psram", "sd"},
+        )
+        self.assertTrue(pruned["app_invaders"])
+        self.assertFalse(pruned["app_gameboy"])
 
-        self.assertEqual(name, "retro")
-        self.assertFalse(full_groups["retro"])
-        self.assertTrue(retro_groups["retro"])
-        self.assertFalse(full_packages["app_gameboy"])
-        self.assertTrue(retro_packages["app_gameboy"])
-        for package, enabled in full_packages.items():
-            if enabled:
-                self.assertTrue(retro_packages[package], package)
-
-    def test_rover_retro_is_a_focused_silent_gameboy_flavor(self):
-        name, _, groups, packages = self.resolve("rover-retro")
-
-        self.assertEqual(name, "rover-retro")
-        self.assertTrue(groups["retro"])
-        for group in (
-            "expansions",
-            "maintenance_apps",
-            "maintenance_jobs",
-            "hardware_jobs",
-            "audio",
-            "agent",
-            "media",
-            "games",
-            "python",
-            "lua",
-            "utils",
-        ):
-            self.assertFalse(groups[group], group)
-        self.assertTrue(groups["system"])
-        self.assertTrue(groups["net"])
-        # app_files is a writing-group trigger, but no other writing app is
-        # selected by the explicitly disabled group.
-        self.assertTrue(groups["writing"])
-
-        for package in (
-            "system_shell",
-            "service_ble",
-            "service_sd",
-            "service_resources",
-            "service_gpio",
-            "service_uart",
-            "service_wifi",
-            "service_ssh",
-            "core_fs_commands",
-            "service_zip",
-            "app_docs",
-            "app_edit",
-            "app_less",
-            "app_com",
-            "app_files",
-            "app_io",
-            "app_ssh",
-            "app_scp",
-            "app_gameboy",
-            "job_log",
-            "service_link",
-            "job_bridge",
-        ):
-            self.assertTrue(packages[package], package)
-        for package in (
-            "service_audio_board",
-            "service_synth",
-            "service_ota",
-            "service_net",
-            "service_mqtt",
-            "service_mail",
-            "service_http_client",
-            "service_http_server",
-            "app_invaders",
-            "app_curl",
-            "app_webradio",
-            "app_telnet",
-            "app_web",
-            "app_email",
-            "app_reader",
-            "app_writer",
-            "app_notes",
-            "app_python",
-            "app_lua",
-            "job_httpd",
-            "job_telnetd",
-            "job_ntp_sync",
-        ):
-            self.assertFalse(packages[package], package)
-
-        self.assertTrue(packages["service_audio"])
-
+        _, capable = generate_flavor_config.apply_board_capability_pruning(
+            self.catalog,
+            groups,
+            packages,
+            {"gfx", "psram", "sd", "streaming_display"},
+        )
+        self.assertTrue(capable["app_gameboy"])
 
 if __name__ == "__main__":
     unittest.main()

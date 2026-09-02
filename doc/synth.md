@@ -94,9 +94,13 @@ The Preset tab contains eight read-only factory sounds and eight user slots.
 `Enter` loads the selected patch and `V` saves the complete current sound to a
 user slot. A patch contains both oscillators, amplifier and filter envelopes,
 filter controls, mono/poly mode, glide time, and the custom wavetable;
-performance octave, velocity, and global speaker volume remain unchanged. The
-Glide tab selects polyphonic or monophonic last-note playback and glide from 0
-through 2500 ms. User slots are stored as versioned,
+performance octave, velocity, hold mode, and global speaker volume remain
+unchanged. The Glide tab selects polyphonic or monophonic last-note playback,
+toggle-style hold mode, and glide from 0 through 2500 ms. With hold enabled,
+each physical or terminal piano-key press toggles its note on or off and key
+release does not stop it. Disabling hold releases all latched app-key notes.
+MIDI Note On, Note Off, and sustain keep their normal behavior. User slots are
+stored as versioned,
 checksummed files below `.solar/synth/presets` on the preferred persistent
 volume, with internal flash used when no SD card is mounted.
 All six tabs use the same compact on-screen piano. `X` hides or shows it while
@@ -151,6 +155,23 @@ The cutoff parameter declares a logarithmic 40 through 18000 Hz curve, so a
 linear physical potentiometer has musically useful travel across the audible
 range. Parameters disappear while Synth is suspended or stopped; bindings stay
 configured and reconnect when Synth resumes.
+
+An incoming MIDI controller can use the same parameter path through an explicit
+scalar stream:
+
+```text
+midi monitor
+midi stream add 1 74
+control create cutoff midi.cc.1.74 0 127
+control bind cutoff parameter synth.filter.cutoff pickup=off
+job start midi midi0
+job start controls
+synth
+```
+
+The MIDI service retains the latest matching CC value while its job runs, and
+the controls service applies the Synth parameter's logarithmic curve. Use the
+monitor first to discover the controller's channel and CC number.
 
 The app also shows current octave and velocity, active voices, sample rate, and
 audio errors. Keyboard press and release events sustain held notes and support

@@ -8,10 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "driver/spi_master.h"
 #include "esp_attr.h"
 #include "esp_err.h"
-#include "solar_os_board.h"
 #include "solar_os_board_caps.h"
 #include "solar_os_buses.h"
 #include "solar_os_config.h"
@@ -1349,32 +1347,26 @@ static int io_nth_free_pin(size_t wanted)
 
 static int io_first_allowed_endpoint(solar_os_bus_protocol_t protocol)
 {
-    if (protocol == SOLAR_OS_BUS_PROTOCOL_I2C) {
-        for (int port = 0; port <= 1; port++) {
+    const size_t endpoint_count = solar_os_bus_runtime_endpoint_count(protocol);
+    for (size_t endpoint_index = 0U; endpoint_index < endpoint_count; endpoint_index++) {
+        int endpoint = -1;
+        if (!solar_os_bus_runtime_endpoint_get(protocol, endpoint_index, &endpoint)) {
+            continue;
+        }
+        if (protocol == SOLAR_OS_BUS_PROTOCOL_I2C) {
             bool used = false;
             for (size_t i = 0; i < solar_os_bus_count(); i++) {
                 solar_os_bus_info_t bus;
                 if (solar_os_bus_get(i, &bus) && bus.attached &&
-                    bus.protocol == protocol && bus.config.i2c.port == port) {
+                    bus.protocol == protocol && bus.config.i2c.port == endpoint) {
                     used = true;
                 }
             }
-            if (!used) {
-                return port;
+            if (used) {
+                continue;
             }
         }
-    } else if (protocol == SOLAR_OS_BUS_PROTOCOL_SPI) {
-        for (int host = SPI2_HOST; host <= SPI3_HOST; host++) {
-            if ((SOLAR_OS_BOARD_RUNTIME_SPI_HOST_MASK & (1U << (unsigned)host)) != 0U) {
-                return host;
-            }
-        }
-    } else if (protocol == SOLAR_OS_BUS_PROTOCOL_UART) {
-        for (int port = 0; port < 3; port++) {
-            if ((SOLAR_OS_BOARD_RUNTIME_UART_PORT_MASK & (1U << (unsigned)port)) != 0U) {
-                return port;
-            }
-        }
+        return endpoint;
     }
     return -1;
 }
@@ -1427,34 +1419,22 @@ static void io_form_begin(solar_os_bus_protocol_t protocol)
 static void io_protocols_build(void)
 {
     io.protocol_count = 0;
-#if SOLAR_OS_PACKAGE_SERVICE_I2C
-    if (solar_os_board_has(SOLAR_OS_BOARD_CAP_EXPANSION_I2C)) {
+    if (solar_os_bus_runtime_protocol_available(SOLAR_OS_BUS_PROTOCOL_I2C)) {
         io.protocols[io.protocol_count++] = SOLAR_OS_BUS_PROTOCOL_I2C;
     }
-#endif
-#if SOLAR_OS_PACKAGE_SERVICE_SPI
-    if (solar_os_board_has(SOLAR_OS_BOARD_CAP_EXPANSION_SPI) &&
-        SOLAR_OS_BOARD_RUNTIME_SPI_HOST_MASK != 0U) {
+    if (solar_os_bus_runtime_protocol_available(SOLAR_OS_BUS_PROTOCOL_SPI)) {
         io.protocols[io.protocol_count++] = SOLAR_OS_BUS_PROTOCOL_SPI;
     }
-#endif
-#if SOLAR_OS_PACKAGE_SERVICE_UART
-    if (solar_os_board_has(SOLAR_OS_BOARD_CAP_EXPANSION_UART) &&
-        SOLAR_OS_BOARD_RUNTIME_UART_PORT_MASK != 0U) {
+    if (solar_os_bus_runtime_protocol_available(SOLAR_OS_BUS_PROTOCOL_UART)) {
         io.protocols[io.protocol_count++] = SOLAR_OS_BUS_PROTOCOL_UART;
         io.protocols[io.protocol_count++] = SOLAR_OS_BUS_PROTOCOL_MIDI;
     }
-#endif
-#if SOLAR_OS_PACKAGE_SERVICE_ONEWIRE
-    if (solar_os_board_has(SOLAR_OS_BOARD_CAP_EXPANSION_GPIO)) {
+    if (solar_os_bus_runtime_protocol_available(SOLAR_OS_BUS_PROTOCOL_ONEWIRE)) {
         io.protocols[io.protocol_count++] = SOLAR_OS_BUS_PROTOCOL_ONEWIRE;
     }
-#endif
-#if SOLAR_OS_PACKAGE_SERVICE_PS2
-    if (solar_os_board_has(SOLAR_OS_BOARD_CAP_EXPANSION_GPIO)) {
+    if (solar_os_bus_runtime_protocol_available(SOLAR_OS_BUS_PROTOCOL_PS2)) {
         io.protocols[io.protocol_count++] = SOLAR_OS_BUS_PROTOCOL_PS2;
     }
-#endif
     if (io.protocol_selected >= io.protocol_count) {
         io.protocol_selected = 0;
     }
@@ -1702,22 +1682,14 @@ static int io_cycle_pin(int current, int delta, bool allow_none, size_t field)
 
 static int io_cycle_endpoint(int current, int delta)
 {
-    int values[4];
-    size_t count = 0;
-    if (io.form.protocol == SOLAR_OS_BUS_PROTOCOL_I2C) {
-        values[count++] = 0;
-        values[count++] = 1;
-    } else if (io.form.protocol == SOLAR_OS_BUS_PROTOCOL_SPI) {
-        for (int host = SPI2_HOST; host <= SPI3_HOST; host++) {
-            if ((SOLAR_OS_BOARD_RUNTIME_SPI_HOST_MASK & (1U << (unsigned)host)) != 0U) {
-                values[count++] = host;
-            }
-        }
-    } else if (io.form.protocol == SOLAR_OS_BUS_PROTOCOL_UART) {
-        for (int port = 0; port < 3; port++) {
-            if ((SOLAR_OS_BOARD_RUNTIME_UART_PORT_MASK & (1U << (unsigned)port)) != 0U) {
-                values[count++] = port;
-            }
+    int values[32];
+    const size_t count = solar_os_bus_runtime_endpoint_count(io.form.protocol);
+    if (count > sizeof(values) / sizeof(values[0])) {
+        return -1;
+    }
+    for (size_t i = 0U; i < count; i++) {
+        if (!solar_os_bus_runtime_endpoint_get(io.form.protocol, i, &values[i])) {
+            return -1;
         }
     }
     if (count == 0) {
@@ -2113,7 +2085,7 @@ static void io_handle_browse_key(uint8_t key)
     case SOLAR_OS_KEY_APP_EXIT:
     case 'q':
     case 'Q':
-        solar_os_context_request_exit(io.ctx);
+        solar_os_context_finish(io.ctx, 0, NULL);
         return;
     case '\t':
         io.view = (io_view_t)((io.view + 1U) % IO_VIEW_COUNT);
@@ -2391,7 +2363,7 @@ static bool io_event(solar_os_context_t *ctx, const solar_os_event_t *event)
     }
     const uint8_t key = (uint8_t)event->data.ch;
     if (key == SOLAR_OS_KEY_APP_EXIT) {
-        solar_os_context_request_exit(io.ctx);
+        solar_os_context_finish(io.ctx, 0, NULL);
         return true;
     }
     switch (io.mode) {
@@ -2428,6 +2400,7 @@ static void io_title(solar_os_context_t *ctx, char *buffer, size_t buffer_len)
 const solar_os_app_t solar_os_io_app = {
     .name = "io",
     .summary = "expansion pin and bus manager",
+    .app_class = SOLAR_OS_APP_CLASS_TUI,
     .flags = SOLAR_OS_APP_FLAG_RESUMABLE,
     .start = io_start,
     .suspend = io_suspend,

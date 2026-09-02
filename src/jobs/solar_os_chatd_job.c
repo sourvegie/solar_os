@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/select.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include "esp_timer.h"
@@ -19,6 +20,7 @@
 #include "lwip/sockets.h"
 #include "solar_os_chat_protocol.h"
 #include "solar_os_jobs.h"
+#include "solar_os_json_scan.h"
 #include "solar_os_log.h"
 #include "solar_os_memory.h"
 #include "solar_os_storage.h"
@@ -56,6 +58,7 @@ typedef struct {
 
 typedef struct {
     bool valid;
+    uint64_t message_id;
     char type[CHATD_HISTORY_TYPE_MAX];
     char channel[SOLAR_OS_CHAT_CHANNEL_MAX];
     char from[SOLAR_OS_CHAT_USER_MAX];
@@ -79,6 +82,7 @@ typedef struct {
     chatd_history_entry_t *history;
     size_t history_head;
     size_t history_count;
+    uint64_t next_message_id;
     FILE *history_file;
     char history_path[SOLAR_OS_STORAGE_PATH_MAX];
     uint32_t connection_count;
@@ -102,6 +106,23 @@ static chatd_job_state_t chatd_job = {
 static uint64_t chatd_now_ms(void)
 {
     return (uint64_t)(esp_timer_get_time() / 1000LL);
+}
+
+static uint64_t chatd_next_message_id(chatd_job_state_t *state)
+{
+    struct timeval now;
+    uint64_t candidate = 0;
+    if (gettimeofday(&now, NULL) == 0 && now.tv_sec >= 1577836800LL) {
+        candidate = (uint64_t)now.tv_sec * 1000000ULL +
+            (uint64_t)now.tv_usec;
+    } else {
+        candidate = (uint64_t)esp_timer_get_time();
+    }
+    if (candidate <= state->next_message_id) {
+        candidate = state->next_message_id + 1U;
+    }
+    state->next_message_id = candidate;
+    return candidate;
 }
 
 static void chatd_builder_init(chatd_json_builder_t *builder, char *data, size_t cap)
@@ -221,6 +242,7 @@ static bool chatd_build_event_at(chatd_job_state_t *state,
                                  const char *text,
                                  bool include_ts,
                                  uint64_t timestamp,
+                                 uint64_t message_id,
                                  int code,
                                  bool include_code)
 {
@@ -234,6 +256,10 @@ static bool chatd_build_event_at(chatd_job_state_t *state,
     if (include_ts) {
         chatd_builder_put(&builder, ",\"ts\":");
         chatd_builder_put_u64(&builder, timestamp);
+    }
+    if (message_id != 0) {
+        chatd_builder_put(&builder, ",\"id\":");
+        chatd_builder_put_u64(&builder, message_id);
     }
     if (include_code) {
         chatd_builder_put(&builder, ",\"code\":");
@@ -259,6 +285,7 @@ static bool chatd_build_event(chatd_job_state_t *state,
                                 text,
                                 include_ts,
                                 chatd_now_ms(),
+                                0,
                                 code,
                                 include_code);
 }
@@ -327,10 +354,11 @@ static void chatd_store_history(chatd_job_state_t *state,
                                 const char *channel,
                                 const char *from,
                                 const char *text,
-                                uint64_t timestamp)
+                                uint64_t timestamp,
+                                uint64_t message_id)
 {
     if (state == NULL || state->history == NULL || type == NULL || channel == NULL ||
-        channel[0] == '\0') {
+        channel[0] == '\0' || strcmp(type, "msg") != 0 || message_id == 0) {
         return;
     }
 
@@ -338,6 +366,7 @@ static void chatd_store_history(chatd_job_state_t *state,
     chatd_history_entry_t *entry = &state->history[index];
     memset(entry, 0, sizeof(*entry));
     entry->valid = true;
+    entry->message_id = message_id;
     strlcpy(entry->type, type, sizeof(entry->type));
     strlcpy(entry->channel, channel, sizeof(entry->channel));
     if (from != NULL) {
@@ -380,7 +409,8 @@ static void chatd_append_history_dump(chatd_job_state_t *state, const char *line
 
 static void chatd_send_history(chatd_job_state_t *state,
                                chatd_client_t *client,
-                               size_t channel_index)
+                               size_t channel_index,
+                               uint64_t cursor)
 {
     if (state == NULL || client == NULL || state->history == NULL ||
         channel_index >= state->channel_count || state->history_count == 0) {
@@ -393,7 +423,8 @@ static void chatd_send_history(chatd_job_state_t *state,
     for (size_t logical = 0; logical < state->history_count; logical++) {
         const size_t index = (oldest + logical) % CHATD_HISTORY_COUNT;
         const chatd_history_entry_t *entry = &state->history[index];
-        if (!entry->valid || strcmp(entry->channel, channel) != 0) {
+        if (!entry->valid || strcmp(entry->channel, channel) != 0 ||
+            entry->message_id <= cursor) {
             continue;
         }
         if (!chatd_build_event_at(state,
@@ -403,6 +434,7 @@ static void chatd_send_history(chatd_job_state_t *state,
                                   entry->text,
                                   true,
                                   entry->timestamp,
+                                  entry->message_id,
                                   0,
                                   false) ||
             !chatd_send_raw(client, state->tx_line)) {
@@ -424,6 +456,8 @@ static void chatd_broadcast_event(chatd_job_state_t *state,
         return;
     }
     const uint64_t timestamp = include_ts ? chatd_now_ms() : 0;
+    const uint64_t message_id = strcmp(type, "msg") == 0 ?
+        chatd_next_message_id(state) : 0;
     const char *channel = state->channels[channel_index];
     if (!chatd_build_event_at(state,
                               type,
@@ -432,13 +466,20 @@ static void chatd_broadcast_event(chatd_job_state_t *state,
                               text,
                               include_ts,
                               timestamp,
+                              message_id,
                               0,
                               false)) {
         state->dropped_count++;
         return;
     }
-    if (include_ts) {
-        chatd_store_history(state, type, channel, from, text, timestamp);
+    if (message_id != 0) {
+        chatd_store_history(state,
+                            type,
+                            channel,
+                            from,
+                            text,
+                            timestamp,
+                            message_id);
     }
     chatd_append_history_dump(state, state->tx_line);
 
@@ -477,12 +518,10 @@ static void chatd_broadcast_global_event(chatd_job_state_t *state,
                               include_ts,
                               timestamp,
                               0,
+                              0,
                               false)) {
         state->dropped_count++;
         return;
-    }
-    if (include_ts && channel != NULL && channel[0] != '\0') {
-        chatd_store_history(state, type, channel, from, text, timestamp);
     }
     chatd_append_history_dump(state, state->tx_line);
 
@@ -551,171 +590,6 @@ static bool chatd_channel_valid(const char *channel)
     return true;
 }
 
-static const char *chatd_skip_ws(const char *p)
-{
-    while (p != NULL && isspace((unsigned char)*p)) {
-        p++;
-    }
-    return p;
-}
-
-static const char *chatd_parse_json_string(const char *p,
-                                           char *out,
-                                           size_t out_len,
-                                           bool *truncated)
-{
-    if (p == NULL || *p != '"' || out == NULL || out_len == 0) {
-        return NULL;
-    }
-    if (truncated != NULL) {
-        *truncated = false;
-    }
-
-    p++;
-    size_t out_pos = 0;
-    while (*p != '\0') {
-        unsigned char ch = (unsigned char)*p++;
-        if (ch == '"') {
-            out[out_pos] = '\0';
-            return p;
-        }
-        if (ch == '\\') {
-            ch = (unsigned char)*p++;
-            switch (ch) {
-            case '"':
-            case '\\':
-            case '/':
-                break;
-            case 'b':
-                ch = '\b';
-                break;
-            case 'f':
-                ch = '\f';
-                break;
-            case 'n':
-                ch = '\n';
-                break;
-            case 'r':
-                ch = '\r';
-                break;
-            case 't':
-                ch = '\t';
-                break;
-            case 'u':
-                if (!isxdigit((unsigned char)p[0]) ||
-                    !isxdigit((unsigned char)p[1]) ||
-                    !isxdigit((unsigned char)p[2]) ||
-                    !isxdigit((unsigned char)p[3])) {
-                    return NULL;
-                }
-                p += 4;
-                ch = '?';
-                break;
-            default:
-                return NULL;
-            }
-        }
-        if (out_pos + 1U < out_len) {
-            out[out_pos++] = (char)ch;
-        } else if (truncated != NULL) {
-            *truncated = true;
-        }
-    }
-    return NULL;
-}
-
-static const char *chatd_skip_json_value(const char *p)
-{
-    p = chatd_skip_ws(p);
-    if (p == NULL) {
-        return NULL;
-    }
-    if (*p == '"') {
-        char scratch[2];
-        return chatd_parse_json_string(p, scratch, sizeof(scratch), NULL);
-    }
-    if (*p == '{' || *p == '[') {
-        const char open = *p++;
-        const char close = open == '{' ? '}' : ']';
-        int depth = 1;
-        while (*p != '\0') {
-            if (*p == '"') {
-                char scratch[2];
-                p = chatd_parse_json_string(p, scratch, sizeof(scratch), NULL);
-                if (p == NULL) {
-                    return NULL;
-                }
-                continue;
-            }
-            if (*p == open) {
-                depth++;
-            } else if (*p == close) {
-                depth--;
-                if (depth == 0) {
-                    return p + 1;
-                }
-            }
-            p++;
-        }
-        return NULL;
-    }
-    while (*p != '\0' && *p != ',' && *p != '}') {
-        p++;
-    }
-    return p;
-}
-
-static bool chatd_json_get_string(const char *json,
-                                  const char *key,
-                                  char *out,
-                                  size_t out_len)
-{
-    if (json == NULL || key == NULL || out == NULL || out_len == 0) {
-        return false;
-    }
-    out[0] = '\0';
-
-    const char *p = chatd_skip_ws(json);
-    if (p == NULL || *p != '{') {
-        return false;
-    }
-    p++;
-
-    while (*p != '\0') {
-        p = chatd_skip_ws(p);
-        if (*p == '}') {
-            return false;
-        }
-
-        char member[32];
-        p = chatd_parse_json_string(p, member, sizeof(member), NULL);
-        if (p == NULL) {
-            return false;
-        }
-        p = chatd_skip_ws(p);
-        if (*p != ':') {
-            return false;
-        }
-        p = chatd_skip_ws(p + 1);
-
-        if (strcmp(member, key) == 0 && *p == '"') {
-            return chatd_parse_json_string(p, out, out_len, NULL) != NULL;
-        }
-
-        p = chatd_skip_json_value(p);
-        if (p == NULL) {
-            return false;
-        }
-        p = chatd_skip_ws(p);
-        if (*p == ',') {
-            p++;
-        } else if (*p == '}') {
-            return false;
-        }
-    }
-    return false;
-}
-
 static int chatd_find_channel(chatd_job_state_t *state, const char *channel)
 {
     if (state == NULL || channel == NULL) {
@@ -766,7 +640,10 @@ static void chatd_make_from(chatd_client_t *client)
     }
 }
 
-static void chatd_client_join(chatd_job_state_t *state, size_t client_index, const char *channel)
+static void chatd_client_join(chatd_job_state_t *state,
+                              size_t client_index,
+                              const char *channel,
+                              uint64_t cursor)
 {
     chatd_client_t *client = &state->clients[client_index];
     bool created = false;
@@ -791,19 +668,7 @@ static void chatd_client_join(chatd_job_state_t *state, size_t client_index, con
     }
 
     const uint32_t mask = 1UL << (uint32_t)channel_index;
-    if ((client->joined_mask & mask) != 0) {
-        (void)chatd_send_event(state,
-                               client,
-                               "joined",
-                               state->channels[channel_index],
-                               client->from,
-                               "joined",
-                               true,
-                               0,
-                               false);
-        return;
-    }
-
+    const bool first_join = (client->joined_mask & mask) == 0;
     client->joined_mask |= mask;
     (void)chatd_send_event(state,
                            client,
@@ -814,14 +679,16 @@ static void chatd_client_join(chatd_job_state_t *state, size_t client_index, con
                            true,
                            0,
                            false);
-    chatd_send_history(state, client, (size_t)channel_index);
-    chatd_broadcast_event(state,
-                          (size_t)channel_index,
-                          "presence",
-                          client->from,
-                          "joined",
-                          true,
-                          (int)client_index);
+    chatd_send_history(state, client, (size_t)channel_index, cursor);
+    if (first_join) {
+        chatd_broadcast_event(state,
+                              (size_t)channel_index,
+                              "presence",
+                              client->from,
+                              "joined",
+                              true,
+                              (int)client_index);
+    }
 }
 
 static uint32_t chatd_mask_without_channel(uint32_t mask, size_t channel_index)
@@ -1030,9 +897,9 @@ static void chatd_handle_hello(chatd_job_state_t *state, size_t client_index, co
     char user[SOLAR_OS_CHAT_USER_MAX] = {0};
     char device[SOLAR_OS_CHAT_DEVICE_MAX] = {0};
 
-    (void)chatd_json_get_string(line, "token", token, sizeof(token));
-    (void)chatd_json_get_string(line, "user", user, sizeof(user));
-    (void)chatd_json_get_string(line, "device", device, sizeof(device));
+    (void)solar_os_json_scan_object_string(line, "token", token, sizeof(token), NULL);
+    (void)solar_os_json_scan_object_string(line, "user", user, sizeof(user), NULL);
+    (void)solar_os_json_scan_object_string(line, "device", device, sizeof(device), NULL);
 
     if (state->token_set && strcmp(token, state->token) != 0) {
         (void)chatd_send_event(state,
@@ -1075,7 +942,6 @@ static void chatd_handle_hello(chatd_job_state_t *state, size_t client_index, co
     for (size_t i = 0; i < state->channel_count; i++) {
         (void)chatd_send_channel_event(state, client, state->channels[i]);
     }
-    chatd_client_join(state, client_index, CHATD_DEFAULT_CHANNEL);
     SOLAR_OS_LOGI(TAG, "client connected: %s %s", client->peer, client->from);
 }
 
@@ -1085,7 +951,7 @@ static void chatd_process_line(chatd_job_state_t *state, size_t client_index, co
     char type[24] = {0};
     char channel[SOLAR_OS_CHAT_CHANNEL_MAX] = {0};
 
-    if (!chatd_json_get_string(line, "type", type, sizeof(type))) {
+    if (!solar_os_json_scan_object_string(line, "type", type, sizeof(type), NULL)) {
         (void)chatd_send_event(state,
                                client,
                                "error",
@@ -1118,17 +984,22 @@ static void chatd_process_line(chatd_job_state_t *state, size_t client_index, co
     }
 
     if (strcmp(type, "join") == 0) {
-        if (!chatd_json_get_string(line, "channel", channel, sizeof(channel))) {
+        uint64_t cursor = 0;
+        if (!solar_os_json_scan_object_string(
+                line, "channel", channel, sizeof(channel), NULL)) {
             strlcpy(channel, CHATD_DEFAULT_CHANNEL, sizeof(channel));
         }
-        chatd_client_join(state, client_index, channel);
+        (void)solar_os_json_scan_object_uint64(line, "cursor", &cursor);
+        chatd_client_join(state, client_index, channel, cursor);
     } else if (strcmp(type, "leave") == 0) {
-        if (!chatd_json_get_string(line, "channel", channel, sizeof(channel))) {
+        if (!solar_os_json_scan_object_string(
+                line, "channel", channel, sizeof(channel), NULL)) {
             strlcpy(channel, CHATD_DEFAULT_CHANNEL, sizeof(channel));
         }
         chatd_client_leave(state, client_index, channel);
     } else if (strcmp(type, "delete") == 0) {
-        if (!chatd_json_get_string(line, "channel", channel, sizeof(channel))) {
+        if (!solar_os_json_scan_object_string(
+                line, "channel", channel, sizeof(channel), NULL)) {
             (void)chatd_send_event(state,
                                    client,
                                    "error",
@@ -1142,10 +1013,12 @@ static void chatd_process_line(chatd_job_state_t *state, size_t client_index, co
         }
         chatd_client_delete_channel(state, client_index, channel);
     } else if (strcmp(type, "msg") == 0) {
-        if (!chatd_json_get_string(line, "channel", channel, sizeof(channel))) {
+        if (!solar_os_json_scan_object_string(
+                line, "channel", channel, sizeof(channel), NULL)) {
             strlcpy(channel, CHATD_DEFAULT_CHANNEL, sizeof(channel));
         }
-        if (!chatd_json_get_string(line, "text", state->text_arg, SOLAR_OS_CHAT_TEXT_MAX)) {
+        if (!solar_os_json_scan_object_string(
+                line, "text", state->text_arg, SOLAR_OS_CHAT_TEXT_MAX, NULL)) {
             (void)chatd_send_event(state,
                                    client,
                                    "error",
@@ -1588,6 +1461,7 @@ static esp_err_t chatd_job_start(solar_os_context_t *ctx, int argc, char **argv)
     chatd_job.history_path[0] = '\0';
     chatd_job.history_head = 0;
     chatd_job.history_count = 0;
+    chatd_job.next_message_id = 0;
     if (token != NULL) {
         strlcpy(chatd_job.token, token, sizeof(chatd_job.token));
     }

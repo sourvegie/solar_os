@@ -79,8 +79,8 @@ Radio listeners expose their radio as a custom job resource.
 
 GPIO-key mappings claim each selected pin through the same resource model. The
 `io` application therefore shows assignments such as `key:UP`, their
-`job:gpio-keys` owner, and the board's canonical pin policy without special
-GPIO-key display logic.
+`gpio-keys-job` attachment owner, and the board's canonical pin policy without
+special GPIO-key display logic.
 
 Tick intervals and execution-time deadlines are declared by each event-driven
 job. A zero descriptor value selects the runtime default. Deadline misses do
@@ -428,6 +428,32 @@ Control definitions are runtime configuration. Put the `control create`,
 restore a hardware setup after reboot. See `man controls` for calibration,
 manual script inputs, MIDI examples, and inspection commands.
 
+## osc
+
+OSC 1.0 IPv4 UDP adapter for automatic incoming native-parameter writes and
+explicit named outbound stream, event-stream, or normalized-control bindings.
+
+```text
+job start osc [listen=port] [target=host:port] [peer=ipv4]
+job status osc
+job stop osc
+```
+
+The listening port defaults to `9000`. `target=` is optional for an
+incoming-only job and is required before an outbound binding can send.
+`peer=` accepts one exact IPv4 address and drops all other incoming sources.
+
+The worker owns one UDP socket and a 6 KiB internal stack. It accepts packets
+up to 512 bytes, at most eight parameter updates per packet, immediate bundles
+only, and at most 100 accepted packets per second. Detailed status includes the
+listener, target, peer filter, inbound apply/error counters, outbound
+send/source errors, and the current binding count.
+
+OSC has no authentication or encryption. Start the job only on a trusted LAN,
+SoftAP, or WireGuard path. Bindings are volatile and can be restored from
+`/.shell/startup`. See `man osc` for address mapping, binding syntax, limits,
+and the sampled-event caveat.
+
 ## displayd
 
 Authenticated HTTP display and remote control. It has two modes:
@@ -542,6 +568,40 @@ Notes:
 - MIME types are provided for common text, image, audio, JSON, JavaScript, and
   CSS files.
 
+## ftpd
+
+Unencrypted FTP file server for one exported folder. The job supports one
+client at a time and passive IPv4 data connections.
+
+Usage:
+
+```text
+job start ftpd <folder> [port] [--user USER --password PASSWORD]
+job stop ftpd
+job status ftpd
+```
+
+Examples:
+
+```text
+job start ftpd /shared
+job start ftpd /shared 2121 --user solaros --password local-secret
+```
+
+Notes:
+
+- The default port is `21`.
+- Login is anonymous by default. Anonymous clients use `anonymous` or `ftp` as
+  the username; the supplied password is ignored.
+- `--user` and `--password` must be supplied together. They provide plaintext
+  access control, not encryption. The password also remains in local shell
+  history. Use the daemon only on a trusted network.
+- FTP `/` is the exported folder. Normalized paths cannot walk above that
+  folder, and the export root itself cannot be deleted, replaced, or renamed.
+- Supported operations include directory listing, download, upload, create and
+  remove directory, delete, rename, size, current directory, and passive-mode
+  negotiation. Active mode and TLS are not supported.
+
 ## log
 
 Runtime SolarOS log follower. It mirrors log entries to a byte-stream port or
@@ -601,6 +661,9 @@ Notes:
   and update the shell dimensions.
 - Interactive line edits use the shared port shell's coalesced redraws, so the
   cursor does not visibly jump to the prompt while typing.
+- While a client is attached, telnetd holds a low-latency Wi-Fi lease that
+  disables modem sleep. Disconnecting restores the normal Wi-Fi power-save
+  policy.
 - Disconnecting closes the child shell session and releases any foreground app
   or resource it owns.
 - Remote sessions do not run `/.shell/startup`.
@@ -924,16 +987,19 @@ pins reject the complete start. Starting with a button already held does not
 generate a press. The file is read only at startup; restart the job to reload
 it.
 
-While the job runs, every pin has owner `job:gpio-keys` and an assignment such
-as `key:UP` in the `io` Pins and Claims views. Stopping the job resets the pins,
-releases their claims, and discards queued events from this input source. The
-fixed ODROID-GO button service remains independent of this job but uses the
-same held-key and repeat service.
+While the job runs, every pin belongs to the `gpio-keys-job` expansion
+attachment and has an assignment such as `key:UP` in the `io` Pins and Claims
+views. Stopping the job detaches that device, resets the pins, releases their
+claims, and discards queued events from this input source. The fixed ODROID-GO
+button service remains independent but uses the same held-key and repeat
+service.
 
 ## ps2-keyboard
 
 Receives keyboard scan-code set 2 from an exclusive named PS/2 bus and publishes
-press and release transitions through the generic SolarOS input service.
+press and release transitions through the generic SolarOS input service. This
+job is a compatibility wrapper around a `ps2-keyboard` expansion attachment;
+new configurations can attach the device directly.
 
 ```text
 expansion bus create ps2 ps2kbd clock=gpio17 data=gpio18
@@ -942,8 +1008,13 @@ job status ps2-keyboard
 job stop ps2-keyboard
 ```
 
-The bus descriptor owns the CLOCK and DATA pins as `bus:ps2kbd`; the running
-job holds an exclusive lease and appears as `job:ps2-keyboard`. Normal and
+These commands cover an expansion bus. Boards with an integrated PS/2 keyboard
+declare the bus and a default expansion attachment. On TTGO VGA32 v1.4,
+`keyboard0` is attached to `ps2kbd0` before the shell starts and is inspected
+with `expansion devices` and `input test keyboard0`.
+
+The bus descriptor owns the CLOCK and DATA pins as `bus:ps2kbd`; the wrapper's
+`ps2-keyboard-job` attachment holds the exclusive lease. Normal and
 extended keys, modifiers, navigation keys, function keys, and keypad usages are
 translated to canonical USB HID identities. The configured `setterm keyboard`
 layout and `setterm keyrate` repeat policy apply equally to BLE and PS/2.
@@ -976,6 +1047,27 @@ and published to subscribers such as the Synth app. Outgoing messages are
 queued with `midi note-on`, `midi note-off`, `midi cc`, `midi program`, or
 `midi send`. Status reports RX and TX byte/message counts, unsupported parser
 input, queue drops, and the last transport error.
+
+Run `midi monitor` and move a controller to identify its mapping. The monitor
+prints `CC: <channel> <controller> <value>` for control changes and
+`KEY: <channel> <note> <velocity>` for note activity. Note releases use velocity
+zero. The app-exit key, `Esc`, or `q` returns to the shell.
+
+Up to 16 exact incoming MIDI CC addresses can also be registered as scalar
+streams. This lets the controls job map a MIDI controller through the standard
+normalized control path to any live application parameter:
+
+```text
+midi stream add 1 74
+control create cutoff midi.cc.1.74 0 127
+control bind cutoff parameter synth.filter.cutoff pickup=off
+job start controls
+synth
+```
+
+Use `midi stream list`, `midi stream remove <channel> <controller>`, and
+`midi stream clear` to inspect or remove the volatile definitions. A stream is
+waiting until the running MIDI job receives its first matching value.
 
 Use a compliant electrical interface: MIDI IN requires an optoisolated
 receiver and MIDI OUT requires a current-limited driver. Do not connect DIN

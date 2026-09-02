@@ -17,6 +17,7 @@
 #include "solar_os_keys.h"
 #include "solar_os_memory.h"
 #include "solar_os_storage.h"
+#include "solar_os_text_search.h"
 #include "solar_os_writer_buffer.h"
 #include "solar_os_writer_files.h"
 
@@ -62,7 +63,6 @@ typedef struct {
     bool loaded;
     bool dirty;
     bool suspended;
-    bool error_only;
     bool parse_pending;
     bool layout_pending;
     bool render_pending;
@@ -78,6 +78,7 @@ typedef struct {
     char dialog_input[WRITER_DIALOG_INPUT_MAX];
     size_t dialog_len;
     char replace_find[WRITER_DIALOG_INPUT_MAX];
+    solar_os_text_search_state_t search;
     char message[WRITER_MESSAGE_MAX];
 } writer_state_t;
 
@@ -829,8 +830,7 @@ static void writer_dialog_append(const char *text, size_t text_len)
 
 static bool writer_find_from(const char *query, size_t *match_start)
 {
-    const size_t query_len = strlen(query);
-    if (query_len == 0) {
+    if (query == NULL || query[0] == '\0') {
         return false;
     }
     char *flat = NULL;
@@ -838,18 +838,16 @@ static bool writer_find_from(const char *query, size_t *match_start)
     if (solar_os_writer_buffer_flatten(&writer.buffer, &flat, &len) != ESP_OK) {
         return false;
     }
-    bool found = false;
-    size_t start = writer.cursor < len ? writer.cursor : 0;
-    for (size_t pass = 0; pass < 2 && !found; pass++) {
-        const size_t begin = pass == 0 ? start : 0;
-        const size_t limit = pass == 0 ? len : start;
-        for (size_t i = begin; i + query_len <= limit; i++) {
-            if (memcmp(&flat[i], query, query_len) == 0) {
-                *match_start = i;
-                found = true;
-                break;
-            }
-        }
+    solar_os_text_search_match_t match;
+    const bool found = solar_os_text_search_find(flat,
+                                                 len,
+                                                 query,
+                                                 writer.cursor,
+                                                 false,
+                                                 SOLAR_OS_TEXT_SEARCH_FORWARD,
+                                                 &match);
+    if (found) {
+        *match_start = match.offset;
     }
     solar_os_memory_free(flat);
     return found;
@@ -857,6 +855,11 @@ static bool writer_find_from(const char *query, size_t *match_start)
 
 static void writer_submit_find(const char *query)
 {
+    if (!solar_os_text_search_set_query(&writer.search, query)) {
+        writer_set_message("empty search");
+        writer.dialog = WRITER_DIALOG_NONE;
+        return;
+    }
     size_t match = 0;
     if (!writer_find_from(query, &match)) {
         writer_set_message("not found");
@@ -865,6 +868,9 @@ static void writer_submit_find(const char *query)
     }
     writer.selection_anchor = match;
     writer.cursor = match + strlen(query);
+    writer.search.match.offset = match;
+    writer.search.match.length = strlen(query);
+    writer.search.match_valid = true;
     writer.layout_pending = true;
     writer.render_pending = true;
     writer.dialog = WRITER_DIALOG_NONE;
@@ -921,7 +927,7 @@ static void writer_request_save(void)
 static void writer_request_exit(solar_os_context_t *ctx)
 {
     if (!writer.dirty) {
-        solar_os_context_request_exit(ctx);
+        solar_os_context_finish(ctx, 0, NULL);
         return;
     }
     writer.dialog = WRITER_DIALOG_EXIT;
@@ -945,13 +951,13 @@ static bool writer_handle_dialog(solar_os_context_t *ctx, uint8_t ch)
         } else if (ch == 'd' || ch == 'D') {
             writer.discard_on_stop = true;
             (void)remove(writer.recovery_path);
-            solar_os_context_request_exit(ctx);
+            solar_os_context_finish(ctx, 0, NULL);
         } else if (ch == 's' || ch == 'S') {
             if (writer.path[0] == '\0') {
                 writer.exit_after_save = true;
                 writer_begin_dialog(WRITER_DIALOG_SAVE_AS, "");
             } else if (writer_save_to(writer.path) == ESP_OK) {
-                solar_os_context_request_exit(ctx);
+                solar_os_context_finish(ctx, 0, NULL);
             }
         }
         writer.render_pending = true;
@@ -1013,7 +1019,7 @@ static bool writer_handle_dialog(solar_os_context_t *ctx, uint8_t ch)
                 writer_set_message("enter a path");
                 writer.dialog = WRITER_DIALOG_SAVE_AS;
             } else if (writer_save_to(writer.dialog_input) == ESP_OK && writer.exit_after_save) {
-                solar_os_context_request_exit(ctx);
+                solar_os_context_finish(ctx, 0, NULL);
             }
         } else if (submitted == WRITER_DIALOG_FIND) {
             writer_submit_find(writer.dialog_input);
@@ -1053,13 +1059,6 @@ static bool writer_handle_char(solar_os_context_t *ctx, uint8_t ch)
         writer_request_exit(ctx);
         return true;
     }
-    if (writer.error_only) {
-        if (ch == SOLAR_OS_KEY_ESCAPE) {
-            solar_os_context_request_exit(ctx);
-        }
-        return true;
-    }
-
     switch (ch) {
     case SOLAR_OS_KEY_ESCAPE:
         writer_request_exit(ctx);
@@ -1121,7 +1120,14 @@ static bool writer_handle_char(solar_os_context_t *ctx, uint8_t ch)
         break;
     case 0x02U: writer_wrap("**", "**"); break;
     case 0x03U: writer_copy_selection(false); break;
-    case 0x06U: writer_begin_dialog(WRITER_DIALOG_FIND, ""); break;
+    case 0x06U: writer_begin_dialog(WRITER_DIALOG_FIND, writer.search.query); break;
+    case SOLAR_OS_KEY_F3:
+        if (writer.search.query_len > 0U) {
+            writer_submit_find(writer.search.query);
+        } else {
+            writer_set_message("no search");
+        }
+        break;
     case 0x09U: writer_wrap("*", "*"); break;
     case 0x0bU: writer_link(); break;
     case 0x12U: writer_begin_dialog(WRITER_DIALOG_REPLACE_FIND, ""); break;
@@ -1432,11 +1438,7 @@ static void writer_render(solar_os_context_t *ctx)
     }
     solar_os_gfx_clear(gfx, SOLAR_OS_GFX_COLOR_WHITE);
     writer_draw_header(gfx);
-    if (writer.error_only) {
-        solar_os_gfx_set_color(gfx, SOLAR_OS_GFX_COLOR_BLACK);
-        solar_os_gfx_set_font(gfx, SOLAR_OS_GFX_FONT_MONO_14);
-        solar_os_gfx_text(gfx, WRITER_MARGIN_X, WRITER_HEADER_H + 22, writer.message);
-    } else {
+    {
         solar_os_doc_view_t view = {
             .x = WRITER_MARGIN_X,
             .y = WRITER_HEADER_H + WRITER_MARGIN_Y,
@@ -1484,15 +1486,11 @@ static esp_err_t writer_start(solar_os_context_t *ctx)
     solar_os_context_set_graphics_active(ctx, true);
     const int argc = solar_os_context_argc(ctx);
     if (argc > 2) {
-        writer.error_only = true;
-        writer_set_message("usage: writer [file.md]");
-        writer_render(ctx);
+        solar_os_context_finish(ctx, 2, "usage: writer [file.md]");
         return ESP_OK;
     }
     if (!solar_os_storage_is_mounted()) {
-        writer.error_only = true;
-        writer_set_message("storage not mounted");
-        writer_render(ctx);
+        solar_os_context_finish(ctx, 1, "writer: storage not mounted");
         return ESP_OK;
     }
 
@@ -1502,9 +1500,11 @@ static esp_err_t writer_start(solar_os_context_t *ctx)
         const char *arg = solar_os_context_argv(ctx, 1);
         esp_err_t ret = solar_os_storage_resolve_path(arg, writer.path, sizeof(writer.path));
         if (ret != ESP_OK) {
-            writer.error_only = true;
-            writer_set_message(ret == ESP_ERR_INVALID_SIZE ? "path too long" : "invalid path");
-            writer_render(ctx);
+            solar_os_context_finish(
+                ctx,
+                1,
+                ret == ESP_ERR_INVALID_SIZE ?
+                    "writer: path too long" : "writer: invalid path");
             return ESP_OK;
         }
         strlcpy(writer.display_name, arg, sizeof(writer.display_name));
@@ -1513,10 +1513,12 @@ static esp_err_t writer_start(solar_os_context_t *ctx)
             source = NULL;
             source_len = 0;
         } else if (ret != ESP_OK) {
-            writer.error_only = true;
-            writer_set_message(ret == ESP_ERR_INVALID_SIZE ?
-                "file exceeds 256 KiB; use edit or reader" : "open failed");
-            writer_render(ctx);
+            solar_os_context_finish(
+                ctx,
+                1,
+                ret == ESP_ERR_INVALID_SIZE ?
+                    "writer: file exceeds 256 KiB; use edit or reader" :
+                    "writer: open failed");
             return ESP_OK;
         }
     } else {
@@ -1602,7 +1604,7 @@ static bool writer_event(solar_os_context_t *ctx, const solar_os_event_t *event)
             writer_wake_cursor();
             if (writer.dialog != WRITER_DIALOG_NONE) {
                 writer_dialog_append(encoded, encoded_len);
-            } else if (!writer.error_only) {
+            } else {
                 (void)writer_insert(encoded, encoded_len);
             }
             return true;
@@ -1626,7 +1628,7 @@ static bool writer_event(solar_os_context_t *ctx, const solar_os_event_t *event)
                 writer_set_message("layout failed");
             }
         }
-        if (!writer.error_only && !writer.suspended &&
+        if (!writer.suspended &&
             writer.dialog == WRITER_DIALOG_NONE) {
             if (writer.cursor_blink_ms == 0) {
                 writer.cursor_blink_ms = event->data.tick_ms;
@@ -1660,6 +1662,7 @@ static void writer_title(solar_os_context_t *ctx, char *buffer, size_t buffer_le
 const solar_os_app_t solar_os_writer_app = {
     .name = "writer",
     .summary = "hybrid WYSIWYG Markdown editor",
+    .app_class = SOLAR_OS_APP_CLASS_GUI,
     .flags = SOLAR_OS_APP_FLAG_RESUMABLE | SOLAR_OS_APP_FLAG_KEY_EVENTS,
     .start = writer_start,
     .suspend = writer_suspend,

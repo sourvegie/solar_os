@@ -23,7 +23,6 @@
 #include "solar_os_config.h"
 #include "solar_os_gpio.h"
 #include "solar_os_i2c.h"
-#include "solar_os_joystick.h"
 #include "solar_os_onewire.h"
 #include "solar_os_pins.h"
 #include "solar_os_pwm.h"
@@ -51,7 +50,7 @@ static const char * const disk_subcommands[] = {
 };
 static const char * const battery_subcommands[] = {"status", "config", "capacity", "min_voltage", "max_voltage"};
 static const char * const ble_subcommands[] = {
-    "status", "enable", "disable", "scan", "pair", "forget", "gatt",
+    "status", "enable", "disable", "default", "scan", "pair", "forget", "gatt",
 };
 static const char * const ble_gatt_subcommands[] = {"status", "connect", "disconnect", "services", "chars", "read", "write", "write-nr"};
 static const char * const audio_subcommands[] = {
@@ -62,7 +61,6 @@ static const char * const led_subcommands[] = {"status", "on", "off", "toggle"};
 static const char * const gpio_subcommands[] = {"status", "list", "mode", "read", "write", "release"};
 static const char * const onewire_subcommands[] = {"status", "reset", "scan", "xfer"};
 static const char * const dpad_subcommands[] = {"status", "calibrate"};
-static const char * const joystick_subcommands[] = {"status", "calibrate"};
 static const char * const adc_subcommands[] = {"status", "read"};
 static const char * const pwm_subcommands[] = {"status", "set", "off"};
 static const char * const i2c_subcommands[] = {"status", "speed", "scan", "probe", "read", "write"};
@@ -1341,6 +1339,8 @@ void solar_os_shell_cmd_ble(solar_os_context_t *ctx, int argc, char **argv)
     solar_os_shell_io_t *term = terminal(ctx);
     const bool current_boot_enabled = solar_os_ble_keyboard_enabled_for_current_boot();
     const bool next_boot_enabled = solar_os_ble_keyboard_enabled_for_next_boot();
+    const solar_os_ble_keyboard_boot_setting_t boot_setting =
+        solar_os_ble_keyboard_boot_setting();
 
     if (argc <= 1 || strcmp(argv[1], "status") == 0) {
         if (argc > 2) {
@@ -1363,23 +1363,35 @@ void solar_os_shell_cmd_ble(solar_os_context_t *ctx, int argc, char **argv)
                                  next_boot_enabled ? "enabled" : "disabled",
                                  current_boot_enabled == next_boot_enabled ? "" :
                                      " (reboot to apply)");
+        solar_os_shell_io_printf(
+            term,
+            "BLE preference: %s (board default %s)\n",
+            solar_os_ble_keyboard_boot_setting_name(boot_setting),
+            solar_os_ble_keyboard_board_default_enabled() ? "on" : "off");
         return;
     }
 
-    if (strcmp(argv[1], "enable") == 0 || strcmp(argv[1], "disable") == 0) {
-        const bool enable = strcmp(argv[1], "enable") == 0;
+    if (strcmp(argv[1], "enable") == 0 || strcmp(argv[1], "disable") == 0 ||
+        strcmp(argv[1], "default") == 0) {
+        solar_os_ble_keyboard_boot_setting_t setting =
+            SOLAR_OS_BLE_KEYBOARD_BOOT_DEFAULT;
+        (void)solar_os_ble_keyboard_parse_boot_setting(argv[1], &setting);
         if (argc != 2) {
             solar_os_shell_diag_unexpected(term,
-                                           enable ? "ble enable" : "ble disable",
+                                           "ble boot setting",
                                            argv[2],
-                                           enable ? "ble enable" : "ble disable");
+                                           "ble enable|disable|default");
             return;
         }
-        const esp_err_t err = solar_os_ble_keyboard_set_enabled_for_next_boot(enable);
+        const esp_err_t err = solar_os_ble_keyboard_set_boot_setting(setting);
         if (err == ESP_OK) {
             solar_os_shell_io_printf(term,
-                                     "BLE boot setting saved: %s. Current boot is unchanged; reboot to apply.\n",
-                                     enable ? "enabled" : "disabled");
+                                     "BLE preference saved: %s; next boot %s. "
+                                     "Current boot is unchanged.\n",
+                                     solar_os_ble_keyboard_boot_setting_name(setting),
+                                     solar_os_ble_keyboard_enabled_for_next_boot()
+                                         ? "enabled"
+                                         : "disabled");
         } else {
             solar_os_shell_io_printf(term,
                                      "BLE boot setting save failed: %s\n",
@@ -1391,7 +1403,7 @@ void solar_os_shell_cmd_ble(solar_os_context_t *ctx, int argc, char **argv)
     if (!current_boot_enabled) {
         solar_os_shell_io_writeln(
             term,
-            "BLE is disabled for this boot; run 'ble enable' and reboot first");
+            "BLE is disabled for this boot; run 'setterm ble on' and reboot first");
         return;
     }
 
@@ -1434,7 +1446,7 @@ void solar_os_shell_cmd_ble(solar_os_context_t *ctx, int argc, char **argv)
     }
 
     solar_os_shell_diag_subcommand(term, "ble", argc, argv,
-                                   "ble [status|enable|disable|scan|pair|forget|gatt] ...",
+                                   "ble [status|enable|disable|default|scan|pair|forget|gatt] ...",
                                    ble_subcommands,
                                    sizeof(ble_subcommands) / sizeof(ble_subcommands[0]));
 }
@@ -3093,130 +3105,6 @@ void solar_os_shell_cmd_dpad(solar_os_context_t *ctx, int argc, char **argv)
                                    "dpad [status|calibrate] ...",
                                    dpad_subcommands,
                                    sizeof(dpad_subcommands) / sizeof(dpad_subcommands[0]));
-}
-#endif
-
-#if SOLAR_OS_PACKAGE_SERVICE_JOYSTICK
-static const char *joystick_direction_name(int direction)
-{
-    if (direction < 0) {
-        return "low";
-    }
-    if (direction > 0) {
-        return "high";
-    }
-    return "center";
-}
-
-static void joystick_print_usage(solar_os_shell_io_t *term)
-{
-    solar_os_shell_io_writeln(term, "usage:");
-    solar_os_shell_io_writeln(term, "  joystick [status]");
-    solar_os_shell_io_writeln(term, "  joystick calibrate");
-    solar_os_shell_io_writeln(term, "  joystick calibrate reset");
-}
-
-static void joystick_print_status(solar_os_shell_io_t *term)
-{
-    if (!solar_os_board_has(SOLAR_OS_BOARD_CAP_JOYSTICK)) {
-        solar_os_shell_io_writeln(term, "joystick: not available on this board");
-        return;
-    }
-
-    const size_t count = solar_os_joystick_axis_count();
-    solar_os_shell_io_printf(term, "joystick: %u %s\n", (unsigned)count, count == 1 ? "axis" : "axes");
-    solar_os_shell_io_writeln(term, "AXIS PIN RAW  DIR    LOW-P LOW-R HIGH-R HIGH-P");
-    for (size_t i = 0; i < count; i++) {
-        solar_os_joystick_axis_status_t status;
-        if (!solar_os_joystick_get_axis_status(i, &status)) {
-            continue;
-        }
-
-        if (!status.initialized) {
-            solar_os_shell_io_printf(term,
-                                     "%-4s %-3d -    -      -     -     -      -\n",
-                                     status.name != NULL ? status.name : "?",
-                                     (int)status.pin);
-            continue;
-        }
-
-        if (status.read_error != ESP_OK && !status.raw_valid) {
-            solar_os_shell_io_printf(term,
-                                     "%-4s %-3d err  %-6s %-5u %-5u %-6u %-6u %s\n",
-                                     status.name != NULL ? status.name : "?",
-                                     (int)status.pin,
-                                     joystick_direction_name(status.direction),
-                                     (unsigned)status.low_press,
-                                     (unsigned)status.low_release,
-                                     (unsigned)status.high_release,
-                                     (unsigned)status.high_press,
-                                     solar_os_shell_error_text(status.read_error));
-            continue;
-        }
-
-        solar_os_shell_io_printf(term,
-                                 "%-4s %-3d %-4d %-6s %-5u %-5u %-6u %-6u\n",
-                                 status.name != NULL ? status.name : "?",
-                                 (int)status.pin,
-                                 status.raw,
-                                 joystick_direction_name(status.direction),
-                                 (unsigned)status.low_press,
-                                 (unsigned)status.low_release,
-                                 (unsigned)status.high_release,
-                                 (unsigned)status.high_press);
-    }
-}
-
-void solar_os_shell_cmd_joystick(solar_os_context_t *ctx, int argc, char **argv)
-{
-    solar_os_shell_io_t *term = terminal(ctx);
-
-    if (argc == 1 || strcmp(argv[1], "status") == 0) {
-        if (argc > 2) {
-            solar_os_shell_diag_unexpected(term, "joystick status", argv[2], "joystick status");
-            return;
-        }
-        joystick_print_status(term);
-        return;
-    }
-
-    if (strcmp(argv[1], "calibrate") == 0) {
-        if (argc > 3) {
-            solar_os_shell_diag_unexpected(term, "joystick calibrate", argv[3],
-                                           "joystick calibrate [reset]");
-            return;
-        }
-
-        esp_err_t err;
-        if (argc == 3 && strcmp(argv[2], "reset") == 0) {
-            err = solar_os_joystick_calibrate_reset();
-        } else if (argc == 2) {
-            err = solar_os_joystick_calibrate_center();
-        } else {
-            solar_os_shell_diag_unknown(term, "joystick calibrate", "mode", argv[2],
-                                        solar_os_shell_suggest(argv[2],
-                                                               (const char * const[]){"reset"}, 1),
-                                        "joystick calibrate [reset]");
-            return;
-        }
-
-        if (err == ESP_OK) {
-            solar_os_shell_io_writeln(term, argc == 3 ? "joystick calibration reset" : "joystick center calibrated");
-            joystick_print_status(term);
-        } else if (shell_print_not_supported(term, "joystick", "joystick", err)) {
-            return;
-        } else if (err == ESP_ERR_INVALID_STATE) {
-            solar_os_shell_io_writeln(term, "joystick: not initialized");
-        } else {
-            solar_os_shell_io_printf(term, "joystick calibrate failed: %s\n", solar_os_shell_error_text(err));
-        }
-        return;
-    }
-
-    solar_os_shell_diag_subcommand(term, "joystick", argc, argv,
-                                   "joystick [status|calibrate] ...",
-                                   joystick_subcommands,
-                                   sizeof(joystick_subcommands) / sizeof(joystick_subcommands[0]));
 }
 #endif
 

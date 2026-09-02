@@ -12,11 +12,7 @@
 #include "esp_netif_sntp.h"
 #include "freertos/FreeRTOS.h"
 #include "nvs.h"
-#include "solar_os_board_caps.h"
-
-#if SOLAR_OS_BOARD_HAS_RTC
-#include "solar_os_board_rtc.h"
-#endif
+#include "solar_os_timezone.h"
 
 #define TIME_NVS_NAMESPACE "time"
 #define TIME_NVS_TZ_NAME_KEY "tz_name"
@@ -25,40 +21,12 @@
 #define SECONDS_PER_DAY 86400LL
 #define TIME_VALID_EPOCH_SECONDS 946684800LL
 
-typedef struct {
-    const char *alias;
-    const char *name;
-    const char *posix;
-} timezone_alias_t;
-
-static const timezone_alias_t timezone_aliases[] = {
-    {"UTC", "UTC", "UTC0"},
-    {"utc", "UTC", "UTC0"},
-    {"Etc/UTC", "UTC", "UTC0"},
-    {"Europe/Berlin", "Europe/Berlin", "CET-1CEST,M3.5.0/2,M10.5.0/3"},
-    {"europe/berlin", "Europe/Berlin", "CET-1CEST,M3.5.0/2,M10.5.0/3"},
-    {"Berlin", "Europe/Berlin", "CET-1CEST,M3.5.0/2,M10.5.0/3"},
-    {"berlin", "Europe/Berlin", "CET-1CEST,M3.5.0/2,M10.5.0/3"},
-};
-
 static char timezone_name[SOLAR_OS_TIMEZONE_NAME_MAX] = "UTC";
 static char timezone_posix[SOLAR_OS_TIMEZONE_POSIX_MAX] = "UTC0";
 static bool timezone_loaded;
-
-#if SOLAR_OS_BOARD_HAS_RTC
-static void datetime_from_board(solar_os_datetime_t *out,
-                                const solar_os_board_rtc_datetime_t *in)
-{
-    out->year = in->year;
-    out->month = in->month;
-    out->day = in->day;
-    out->hour = in->hour;
-    out->minute = in->minute;
-    out->second = in->second;
-    out->weekday = in->weekday;
-    out->clock_integrity = in->clock_integrity;
-}
-#endif
+static solar_os_time_provider_t time_provider;
+static char time_provider_owner[24];
+static portMUX_TYPE time_provider_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static void datetime_from_tm(solar_os_datetime_t *out, const struct tm *in, bool clock_integrity)
 {
@@ -71,21 +39,6 @@ static void datetime_from_tm(solar_os_datetime_t *out, const struct tm *in, bool
     out->weekday = (uint8_t)in->tm_wday;
     out->clock_integrity = clock_integrity;
 }
-
-#if SOLAR_OS_BOARD_HAS_RTC
-static void datetime_to_board(solar_os_board_rtc_datetime_t *out,
-                              const solar_os_datetime_t *in)
-{
-    out->year = in->year;
-    out->month = in->month;
-    out->day = in->day;
-    out->hour = in->hour;
-    out->minute = in->minute;
-    out->second = in->second;
-    out->weekday = in->weekday;
-    out->clock_integrity = in->clock_integrity;
-}
-#endif
 
 static bool datetime_is_valid(const solar_os_datetime_t *datetime)
 {
@@ -160,37 +113,6 @@ static esp_err_t datetime_from_utc_epoch(time_t epoch,
     return datetime_is_valid(datetime) ? ESP_OK : ESP_ERR_INVALID_RESPONSE;
 }
 
-static bool timezone_value_is_raw_posix(const char *timezone)
-{
-    bool has_digit = false;
-    bool has_comma = false;
-    bool has_slash = false;
-
-    if (timezone == NULL || timezone[0] == '\0') {
-        return false;
-    }
-
-    const size_t len = strlen(timezone);
-    if (len >= SOLAR_OS_TIMEZONE_POSIX_MAX) {
-        return false;
-    }
-
-    for (const unsigned char *p = (const unsigned char *)timezone; *p != '\0'; p++) {
-        if (!isprint(*p) || isspace(*p)) {
-            return false;
-        }
-        if (isdigit(*p)) {
-            has_digit = true;
-        } else if (*p == ',') {
-            has_comma = true;
-        } else if (*p == '/') {
-            has_slash = true;
-        }
-    }
-
-    return !has_slash || has_digit || has_comma;
-}
-
 static bool ntp_server_is_valid(const char *server)
 {
     if (server == NULL || server[0] == '\0') {
@@ -208,33 +130,6 @@ static bool ntp_server_is_valid(const char *server)
         }
     }
 
-    return true;
-}
-
-static bool timezone_resolve(const char *timezone,
-                             char *name,
-                             size_t name_len,
-                             char *posix,
-                             size_t posix_len)
-{
-    if (timezone == NULL || name == NULL || posix == NULL) {
-        return false;
-    }
-
-    for (size_t i = 0; i < sizeof(timezone_aliases) / sizeof(timezone_aliases[0]); i++) {
-        if (strcmp(timezone, timezone_aliases[i].alias) == 0) {
-            strlcpy(name, timezone_aliases[i].name, name_len);
-            strlcpy(posix, timezone_aliases[i].posix, posix_len);
-            return true;
-        }
-    }
-
-    if (!timezone_value_is_raw_posix(timezone)) {
-        return false;
-    }
-
-    strlcpy(name, timezone, name_len);
-    strlcpy(posix, timezone, posix_len);
     return true;
 }
 
@@ -267,7 +162,8 @@ static void timezone_load(void)
     const esp_err_t posix_ret = nvs_get_str(nvs, TIME_NVS_TZ_POSIX_KEY, stored_posix, &posix_len);
     nvs_close(nvs);
 
-    if (ret == ESP_OK && posix_ret == ESP_OK && timezone_value_is_raw_posix(stored_posix)) {
+    if (ret == ESP_OK && posix_ret == ESP_OK &&
+        solar_os_timezone_value_is_raw_posix(stored_posix)) {
         strlcpy(timezone_name, stored_name, sizeof(timezone_name));
         strlcpy(timezone_posix, stored_posix, sizeof(timezone_posix));
     }
@@ -296,11 +192,68 @@ static esp_err_t timezone_save(void)
 esp_err_t solar_os_time_init(void)
 {
     timezone_load();
-#if !SOLAR_OS_BOARD_HAS_RTC
     return ESP_OK;
-#else
-    return solar_os_board_rtc_init();
-#endif
+}
+
+esp_err_t solar_os_time_register_provider(const char *owner,
+                                          const solar_os_time_provider_t *provider)
+{
+    if (owner == NULL || owner[0] == '\0' ||
+        strnlen(owner, sizeof(time_provider_owner)) >= sizeof(time_provider_owner) ||
+        provider == NULL || provider->get_utc_datetime == NULL ||
+        provider->set_utc_datetime == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t ret = ESP_OK;
+    portENTER_CRITICAL(&time_provider_lock);
+    if (time_provider_owner[0] != '\0') {
+        ret = ESP_ERR_INVALID_STATE;
+    } else {
+        time_provider = *provider;
+        strlcpy(time_provider_owner, owner, sizeof(time_provider_owner));
+    }
+    portEXIT_CRITICAL(&time_provider_lock);
+    return ret;
+}
+
+esp_err_t solar_os_time_unregister_provider(const char *owner)
+{
+    if (owner == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_err_t ret = ESP_OK;
+    portENTER_CRITICAL(&time_provider_lock);
+    if (strcmp(time_provider_owner, owner) != 0) {
+        ret = ESP_ERR_NOT_FOUND;
+    } else {
+        memset(&time_provider, 0, sizeof(time_provider));
+        time_provider_owner[0] = '\0';
+    }
+    portEXIT_CRITICAL(&time_provider_lock);
+    return ret;
+}
+
+bool solar_os_time_has_provider(void)
+{
+    portENTER_CRITICAL(&time_provider_lock);
+    const bool available = time_provider_owner[0] != '\0';
+    portEXIT_CRITICAL(&time_provider_lock);
+    return available;
+}
+
+static bool time_provider_snapshot(solar_os_time_provider_t *provider)
+{
+    if (provider == NULL) {
+        return false;
+    }
+    portENTER_CRITICAL(&time_provider_lock);
+    const bool available = time_provider_owner[0] != '\0';
+    if (available) {
+        *provider = time_provider;
+    }
+    portEXIT_CRITICAL(&time_provider_lock);
+    return available;
 }
 
 uint64_t solar_os_time_uptime_ms(void)
@@ -398,7 +351,11 @@ esp_err_t solar_os_time_get_utc_datetime(solar_os_datetime_t *datetime)
         return ESP_ERR_INVALID_ARG;
     }
 
-#if !SOLAR_OS_BOARD_HAS_RTC
+    solar_os_time_provider_t provider;
+    if (time_provider_snapshot(&provider)) {
+        return provider.get_utc_datetime(provider.user, datetime);
+    }
+
     struct timeval tv;
     if (gettimeofday(&tv, NULL) != 0) {
         return ESP_FAIL;
@@ -407,16 +364,6 @@ esp_err_t solar_os_time_get_utc_datetime(solar_os_datetime_t *datetime)
         return ESP_ERR_INVALID_STATE;
     }
     return datetime_from_utc_epoch((time_t)tv.tv_sec, true, datetime);
-#else
-    solar_os_board_rtc_datetime_t board_datetime;
-    const esp_err_t ret = solar_os_board_rtc_get_datetime(&board_datetime);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    datetime_from_board(datetime, &board_datetime);
-    return ESP_OK;
-#endif
 }
 
 esp_err_t solar_os_time_set_utc_datetime(const solar_os_datetime_t *datetime)
@@ -425,7 +372,11 @@ esp_err_t solar_os_time_set_utc_datetime(const solar_os_datetime_t *datetime)
         return ESP_ERR_INVALID_ARG;
     }
 
-#if !SOLAR_OS_BOARD_HAS_RTC
+    solar_os_time_provider_t provider;
+    if (time_provider_snapshot(&provider)) {
+        return provider.set_utc_datetime(provider.user, datetime);
+    }
+
     time_t epoch = 0;
     esp_err_t ret = epoch_from_utc_datetime(datetime, &epoch);
     if (ret != ESP_OK) {
@@ -436,11 +387,6 @@ esp_err_t solar_os_time_set_utc_datetime(const solar_os_datetime_t *datetime)
         .tv_usec = 0,
     };
     return settimeofday(&tv, NULL) == 0 ? ESP_OK : ESP_FAIL;
-#else
-    solar_os_board_rtc_datetime_t board_datetime;
-    datetime_to_board(&board_datetime, datetime);
-    return solar_os_board_rtc_set_datetime(&board_datetime);
-#endif
 }
 
 esp_err_t solar_os_time_utc_to_local(const solar_os_datetime_t *utc, solar_os_datetime_t *local)
@@ -513,7 +459,7 @@ esp_err_t solar_os_time_set_timezone(const char *timezone)
     char name[SOLAR_OS_TIMEZONE_NAME_MAX];
     char posix[SOLAR_OS_TIMEZONE_POSIX_MAX];
 
-    if (!timezone_resolve(timezone, name, sizeof(name), posix, sizeof(posix))) {
+    if (!solar_os_timezone_resolve(timezone, name, sizeof(name), posix, sizeof(posix))) {
         return ESP_ERR_INVALID_ARG;
     }
 

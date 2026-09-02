@@ -10,7 +10,9 @@
 #include "u8g2.h"
 
 typedef void (*solar_os_sessions_terminal_fn)(solar_os_terminal_t *terminal, void *user);
-typedef void (*solar_os_sessions_overlay_fn)(const char *title, void *user);
+typedef void (*solar_os_sessions_overlay_fn)(const char *title,
+                                             bool after_next_frame,
+                                             void *user);
 
 esp_err_t solar_os_sessions_init(solar_os_context_t *ctx,
                                  solar_os_terminal_t *shell_terminal,
@@ -35,6 +37,9 @@ esp_err_t solar_os_sessions_set_terminal_palette_inverted(solar_os_terminal_t *t
                                                           bool inverted);
 esp_err_t solar_os_sessions_set_terminal_status_bar_visible(solar_os_terminal_t *terminal,
                                                             bool visible);
+esp_err_t solar_os_sessions_set_display_terminal_profile(
+    const char *target_name,
+    const solar_os_terminal_profile_t *profile);
 
 bool solar_os_sessions_switch_to_app(const solar_os_app_t *app);
 bool solar_os_sessions_switch_to_app_with_policy(const solar_os_app_t *app,
@@ -42,6 +47,7 @@ bool solar_os_sessions_switch_to_app_with_policy(const solar_os_app_t *app,
 void solar_os_sessions_cycle_next(void);
 bool solar_os_sessions_cycle_input_focus(void);
 bool solar_os_sessions_cycle_input_focus_previous(void);
+void solar_os_sessions_show_input_focus_overlay(void);
 void solar_os_sessions_mark_foreground_dirty(void);
 
 void solar_os_sessions_dispatch_foreground_event(const solar_os_event_t *event);
@@ -71,6 +77,7 @@ esp_err_t solar_os_sessions_create_display_app(const solar_os_app_t *app,
 esp_err_t solar_os_sessions_focus_display(const char *target_name);
 bool solar_os_sessions_input_focus(char *target_name, size_t target_name_len);
 bool solar_os_sessions_active_for_display(const char *target_name, uint8_t *session_id);
+bool solar_os_sessions_display_accepts_pointer_events(const char *target_name);
 bool solar_os_sessions_context_uses_display(solar_os_context_t *ctx,
                                             const char *target_name);
 bool solar_os_sessions_dispatch_session_event(uint8_t session_id,

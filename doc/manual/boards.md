@@ -4,22 +4,26 @@ title = "Boards and hardware targets"
 section = "build"
 summary = "Supported boards, capabilities, porting structure, and validation"
 aliases = ["board", "targets"]
-keywords = "boards targets waveshare devkit odroid elecrow freenove wrover composite capabilities porting validation"
+keywords = "boards targets custom board profile fixed expansion platformio waveshare devkit odroid elecrow freenove wrover ttgo vga32 composite vga capabilities porting validation"
 packages_any = []
 +++
 # Defining SolarOS Boards
 
-SolarOS separates board support into a small board profile, a C header with board
-identity and pin metadata, and a PlatformIO environment that selects the target.
-The goal is that services and applications can ask for capabilities instead of
-assuming the display terminal hardware exists.
+New board profiles use one versioned TOML manifest in
+`boards/manifests/<target>.toml`. The manifest contains identity, MCU family,
+build capabilities, buses, pins, connector metadata, and automatic fixed
+expansion devices. CMake generates its private board configuration and C header
+from that file. Do not edit generated files in `.pio/build/.../generated`.
 
-These files have distinct ownership: `boards/<target>.cmake` is authoritative
-for capability flags and driver selection, while `include/boards/<target>.h` is
-authoritative for identity, pins, pin policy, controller masks, and static bus
-definitions. Do not add aggregate capability bitmaps to board headers. Runtime
-capability bits are derived from the CMake-generated `SOLAR_OS_BOARD_HAS_*`
-defines.
+`boards/expansion_drivers.toml` is the desktop configuration catalog. It states
+which MCU families, packages, board capabilities, and wiring bindings each
+expansion driver supports. The same catalog is used by the board compiler and
+the configuration TUI.
+
+All built-in boards use manifests. A compatibility loader remains for
+out-of-tree legacy `boards/<target>.cmake` profiles, but new and maintained
+profiles must use TOML. Runtime capability bits remain derived from the
+generated `SOLAR_OS_BOARD_HAS_*` defines.
 
 `scripts/validate_board_metadata.py` checks every board during CMake
 configuration. It verifies board registration and identity, capability registry
@@ -34,35 +38,130 @@ python3 scripts/validate_board_metadata.py
 
 ## File Layout
 
-For a new board target named `my_board`, add:
+The source and generated paths are:
 
 ```text
-boards/my_board.cmake
-include/boards/my_board.h
+boards/manifests/<target>.toml                 source board profile
+boards/expansion_drivers.toml                  selectable driver catalog
+scripts/board_config.py                        desktop TUI
+scripts/os_builder.py                          flavor build/flash TUI
+scripts/generate_board_profile.py              manifest validator/compiler
+.pio/build/<env>/generated/solar_os/            generated CMake and C metadata
 ```
 
-Then update:
+A custom profile normally extends one of the neutral MCU-family base profiles:
 
 ```text
-include/solar_os_board.h
-platformio.ini
+esp32_s3_devkitc1_n16r8    ESP32-S3
+esp32_devkitc_v4_wrover    classic ESP32 with PSRAM
 ```
 
-If PlatformIO does not already provide the board definition, also add:
+It does not need a new CMake file, C header, selector branch, or PlatformIO
+environment. Use the base profile's PlatformIO environment and select the
+custom manifest with `SOLAR_OS_BOARD`.
+
+Reusable CMake fragments in `boards/drivers/` remain the package adapters for
+concrete board services. The manifest compiler selects them from driver-catalog
+metadata. Driver implementation and resource ownership stay in the packaged
+expansion driver, so the profile does not introduce driver-specific `#ifdef`
+branches.
+
+## Creating A Custom Board With The TUI
+
+Run the tool from the SolarOS source directory:
+
+```sh
+python3 scripts/board_config.py
+```
+
+The workflow is MCU-first:
+
+1. Select `ESP32-S3` or `Classic ESP32`.
+2. Select a compatible neutral base board.
+3. Enter the board identity.
+4. Select the permanently wired expansion drivers.
+5. Select existing buses or create new buses, then enter addresses, pins, chip
+   selects, ports, and optional driver parameters.
+6. Confirm the generated profile.
+
+The tool rejects unsupported MCU/driver combinations, duplicate device names,
+invalid addresses and parameters, unavailable chip-select pins, and GPIO
+conflicts. Pins used by a fixed device or a new bus are removed from the runtime
+user-pin surface automatically. The output is one inherited TOML file under
+`boards/manifests/`.
+
+For example, `devkitc1_epaper_workbench.toml` extends the S3 DevKitC profile and
+declares CardKB, SSD1683, and SDSPI as fixed devices. It also declares the second
+SPI bus used by the SD card. Build an inherited profile through its base
+environment:
+
+```sh
+SOLAR_OS_BOARD=devkitc1_epaper_workbench \
+  pio run -e esp32_s3_devkitc1_n16r8
+```
+
+The configurator creates a SolarOS board profile, not a new PlatformIO
+environment. Use the base environment shown by the configurator, and keep
+`SOLAR_OS_BOARD` set for every build or upload invocation. To build and flash
+the example profile in one command:
+
+```sh
+SOLAR_OS_BOARD=devkitc1_epaper_workbench \
+  pio run -e esp32_s3_devkitc1_n16r8 -t upload
+```
+
+The `upload` target builds first when necessary. Add
+`--upload-port <serial-device>` if PlatformIO does not select the correct port.
+If you select a firmware flavor explicitly, keep it on the upload invocation as
+well:
+
+```sh
+SOLAR_OS_BOARD=devkitc1_epaper_workbench SOLAR_OS_FLAVOR=core \
+  pio run -e esp32_s3_devkitc1_n16r8 -t upload
+```
+
+You can edit the generated TOML after leaving the TUI. Validate it before a
+build:
+
+```sh
+python3 scripts/generate_board_profile.py \
+  --manifest boards/manifests/devkitc1_epaper_workbench.toml \
+  --manifest-dir boards/manifests \
+  --drivers boards/expansion_drivers.toml \
+  --validate-only
+```
+
+Fixed devices attach automatically and report `origin=board`. They cannot be
+detached at runtime. Use the established names when the device provides a
+primary board service:
+
+| Hardware role | Fixed device name |
+| --- | --- |
+| Primary display | `display0` |
+| Removable storage | `storage0` |
+| Audio input/output | `audio0` |
+| Primary pointer | `touch0` |
+| Battery monitor | `battery0` |
+| Real-time clock | `rtc0` |
+| Environmental sensor | `environment0` |
+
+The profile declares hardware, not policy. Keep job autostart commands in
+`.shell/startup`. Do not keep `expansion attach`, `expansion bus create`, or
+`session create` commands there for hardware that is now fixed in the profile.
+
+After flashing, verify the automatic devices and their services:
 
 ```text
-boards/my_board.json
+status
+pkg
+port list
+expansion drivers
+expansion devices
 ```
 
-Concrete hardware drivers are selected through reusable CMake fragments:
-
-```text
-boards/drivers/<driver>.cmake
-```
-
-Add a new fragment when a board needs a new concrete display, storage, RTC,
-sensor, battery, audio, or port driver. Do not extend `src/CMakeLists.txt` for
-each new driver.
+A successful manifest validation and build do not prove wiring, polarity,
+power control, or peripheral behavior. Test the generated profile on its
+physical target.
 
 ## Built-In Targets
 
@@ -71,154 +170,26 @@ The current tree includes these board targets:
 | Target | PlatformIO env | Hardware | Highlights |
 | --- | --- | --- | --- |
 | `waveshare_esp32_s3_rlcd_4_2` | `waveshare_esp32_s3_rlcd_4_2` | Waveshare ESP32-S3-RLCD-4.2 | Primary ST7305 reflective display target with SDMMC, CDC, UART, RTC, SHTC3, battery ADC, ES8311/ES7210 audio, expansion I2C/SPI/UART/GPIO/ADC/PWM, and runtime-routable SPI3 on GPIO1/GPIO2/GPIO3/GPIO17. |
+| `freenove_esp32_s3_display_4_0` | `freenove_esp32_s3_display_4_0` | Freenove ESP32-S3 Display 4.0-inch (FNK0104S) | Integrated 480x320 ST7796 display, FT6336 capacitive pointer, ES8311 speaker and microphone, four-bit SDMMC, battery ADC, native USB CDC, and UART/I2C/GPIO expansion connectors. |
 | `elecrow_crowpanel_esp32_s3_4_2_epaper` | `elecrow_crowpanel_esp32_s3_4_2_epaper` | Elecrow CrowPanel ESP32-S3 4.2-inch E-paper | ESP32-S3-WROOM-1-N8R8 target with a 400x300 SSD1683 e-paper display, microSD over SDSPI, CH340C/UART console, rotary/menu/exit controls, status LED, Wi-Fi, BLE, and expansion I2C/SPI/UART/1-Wire/GPIO/ADC/PWM. |
 | `odroid_go` | `odroid_go` | Hardkernel ODROID-GO | Classic ESP32 target with ILI9341 display, SD over VSPI/SDSPI, battery ADC, ESP32 DAC speaker, buttons, ADC D-pad, status LED, display brightness, expansion SPI/UART/GPIO/PWM, and runtime GPIO4/GPIO15. |
 | `freenove_esp32_wrover_v3` | `freenove_esp32_wrover_v3` | Freenove ESP32-WROVER v3.0 (FNK0060) | Classic ESP32 target with 8 MB PSRAM, CH340/UART console, one-bit SDMMC, Wi-Fi, BLE, a GPIO0 BOOT/KEY button, and a 384x288 monochrome PAL composite display on GPIO25. |
+| `ttgo_vga32_v14` | `ttgo_vga32_v14` | LilyGO TTGO VGA32 v1.4 | ESP32-PICO-D4 desktop target with 8 MB external PSRAM, build-selectable 320x200@70Hz, 320x240@60Hz, 640x400@70Hz, or 640x480@60Hz VGA output through the onboard RGB222 resistor DAC, GPIO25 mono DAC audio, a default-attached PS/2 keyboard, v1.4 microSD wiring over HSPI, USB-UART, Wi-Fi, BLE disabled by default, and two input-only expansion GPIOs. |
 | `esp32_s3_devkitc1_n16r8` | `esp32_s3_devkitc1_n16r8` | Espressif ESP32-S3-DevKitC-1-N16R8 | Headless ESP32-S3 target with CDC, UART, Wi-Fi, BLE, a GPIO0 BOOT/KEY button, expansion I2C/SPI/UART/GPIO/ADC/PWM, graphics through attachable display targets, and no primary display or onboard sensors. |
+| `esp32_devkitc_v4_wrover` | `esp32_devkitc_v4_wrover` | Espressif ESP32-DevKitC V4 with ESP32-WROVER-E | Headless classic ESP32 target with PSRAM, UART, Wi-Fi, BLE, a GPIO0 BOOT/KEY button, expansion I2C/SPI/UART/GPIO/ADC/PWM/I2S, graphics through attachable display targets, and no built-in peripherals. |
+| `devkitc1_epaper_workbench` | `esp32_s3_devkitc1_n16r8` with `SOLAR_OS_BOARD=devkitc1_epaper_workbench` | ESP32-S3 DevKitC-1 E-paper Workbench | Manifest-generated development target with fixed CardKB, 400x300 SSD1683 display, and SDSPI storage attachments. |
 
-## Board Profile
+## Generated Build Interface
 
-`boards/<target>.cmake` is consumed by `src/CMakeLists.txt`. It gives the board a
-stable ID, display name, preprocessor define, and compile-time capability set.
+The manifest compiler converts `build.drivers` into reusable CMake driver
+fragments and converts `build.capabilities` into
+`SOLAR_OS_BOARD_HAS_*` definitions. Fixed devices add their driver packages and
+board-service capabilities through `boards/expansion_drivers.toml`. Packages
+whose requirements are not satisfied are pruned.
 
-Minimal headless example:
-
-```cmake
-set(SOLAR_OS_BOARD_ID "esp32_s3_devkitc1_n16r8")
-set(SOLAR_OS_BOARD_NAME "Espressif ESP32-S3-DevKitC-1-N16R8")
-set(SOLAR_OS_BOARD_DEFINE "SOLAR_OS_BOARD_ESP32_S3_DEVKITC1_N16R8")
-
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/cdc_usb_serial_jtag.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/uart_esp_idf.cmake")
-
-set(SOLAR_OS_BOARD_HAS_PSRAM ON)
-set(SOLAR_OS_BOARD_PSRAM_BYTES 8388608)
-set(SOLAR_OS_BOARD_HAS_SIMD ON)
-set(SOLAR_OS_BOARD_HAS_GFX ON)
-set(SOLAR_OS_BOARD_HAS_CDC ON)
-set(SOLAR_OS_BOARD_HAS_UART ON)
-set(SOLAR_OS_BOARD_HAS_WIFI ON)
-set(SOLAR_OS_BOARD_HAS_BLE ON)
-```
-
-Full board example:
-
-```cmake
-set(SOLAR_OS_BOARD_ID "waveshare_esp32_s3_rlcd_4_2")
-set(SOLAR_OS_BOARD_NAME "Waveshare ESP32-S3-RLCD-4.2")
-set(SOLAR_OS_BOARD_DEFINE "SOLAR_OS_BOARD_WAVESHARE_ESP32_S3_RLCD_4_2")
-
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/cdc_usb_serial_jtag.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/uart_esp_idf.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/display_st7305.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/storage_sdmmc.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/i2c_esp_idf.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/spi_esp_idf.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/rtc_pcf85063.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/sensors_shtc3.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/audio_es8311_es7210.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/gpio_esp_idf.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/adc_esp_idf.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/battery_adc.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/pwm_esp_idf.cmake")
-
-set(SOLAR_OS_BOARD_HAS_PSRAM ON)
-set(SOLAR_OS_BOARD_PSRAM_BYTES 8388608)
-set(SOLAR_OS_BOARD_HAS_SIMD ON)
-set(SOLAR_OS_BOARD_HAS_DISPLAY ON)
-set(SOLAR_OS_BOARD_HAS_GFX ON)
-set(SOLAR_OS_BOARD_HAS_CDC ON)
-set(SOLAR_OS_BOARD_HAS_UART ON)
-set(SOLAR_OS_BOARD_HAS_SD ON)
-set(SOLAR_OS_BOARD_HAS_I2C ON)
-set(SOLAR_OS_BOARD_HAS_SPI ON)
-set(SOLAR_OS_BOARD_HAS_RTC ON)
-set(SOLAR_OS_BOARD_HAS_BATTERY ON)
-set(SOLAR_OS_BOARD_HAS_AUDIO ON)
-set(SOLAR_OS_BOARD_HAS_AUDIO_INPUT ON)
-set(SOLAR_OS_BOARD_HAS_WIFI ON)
-set(SOLAR_OS_BOARD_HAS_BLE ON)
-set(SOLAR_OS_BOARD_HAS_GPIO ON)
-set(SOLAR_OS_BOARD_HAS_ADC ON)
-set(SOLAR_OS_BOARD_HAS_PWM ON)
-set(SOLAR_OS_BOARD_HAS_KEY ON)
-set(SOLAR_OS_BOARD_HAS_TEMPERATURE ON)
-set(SOLAR_OS_BOARD_HAS_HUMIDITY ON)
-```
-
-Classic ESP32 display example:
-
-```cmake
-set(SOLAR_OS_BOARD_ID "odroid_go")
-set(SOLAR_OS_BOARD_NAME "Hardkernel ODROID-GO")
-set(SOLAR_OS_BOARD_DEFINE "SOLAR_OS_BOARD_ODROID_GO")
-
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/uart_esp_idf.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/display_ili9341.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/storage_sdspi.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/battery_adc.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/audio_esp32_dac.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/gpio_esp_idf.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/pwm_esp_idf.cmake")
-
-set(SOLAR_OS_BOARD_HAS_PSRAM ON)
-set(SOLAR_OS_BOARD_PSRAM_BYTES 4194304)
-set(SOLAR_OS_BOARD_HAS_DISPLAY ON)
-set(SOLAR_OS_BOARD_HAS_GFX ON)
-set(SOLAR_OS_BOARD_HAS_UART ON)
-set(SOLAR_OS_BOARD_HAS_SD ON)
-set(SOLAR_OS_BOARD_HAS_BATTERY ON)
-set(SOLAR_OS_BOARD_HAS_AUDIO ON)
-set(SOLAR_OS_BOARD_HAS_SPI ON)
-set(SOLAR_OS_BOARD_HAS_GPIO ON)
-set(SOLAR_OS_BOARD_HAS_WIFI ON)
-set(SOLAR_OS_BOARD_HAS_BLE ON)
-set(SOLAR_OS_BOARD_HAS_KEY ON)
-set(SOLAR_OS_BOARD_HAS_BUTTONS ON)
-set(SOLAR_OS_BOARD_HAS_ADC_DPAD ON)
-set(SOLAR_OS_BOARD_HAS_STATUS_LED ON)
-set(SOLAR_OS_BOARD_HAS_PWM ON)
-set(SOLAR_OS_BOARD_HAS_DISPLAY_BRIGHTNESS ON)
-```
-
-Enable a capability when the target can provide that service, either through
-built-in hardware or an explicitly supported expansion path. For pin-backed
-peripherals, the board header must provide the corresponding static definitions
-or runtime routing policy. Packages requiring absent capabilities are pruned.
-
-Capabilities describe what services should exist. Driver fragments describe how
-this board implements those capabilities. For example, a board with
-`SOLAR_OS_BOARD_HAS_DISPLAY ON` must include a fragment such as
-`drivers/display_st7305.cmake`.
-
-Each fragment appends board-specific sources to `SOLAR_OS_BOARD_SRCS`, appends
-ESP-IDF component dependencies to `SOLAR_OS_BOARD_REQUIRES`, and sets the
-matching selector variable. That keeps concrete source/dependency mapping close
-to the driver definition.
-
-Current built-in driver selector values:
-
-| Capability | Fragment | Selector |
-| --- | --- | --- |
-| `CDC` | `drivers/cdc_usb_serial_jtag.cmake` | `SOLAR_OS_BOARD_CDC_DRIVER=usb_serial_jtag` |
-| `CDC` (dormant) | `drivers/cdc_tinyusb_composite.cmake` | `SOLAR_OS_BOARD_CDC_DRIVER=tinyusb_composite` |
-| `UART` | `drivers/uart_esp_idf.cmake` | `SOLAR_OS_BOARD_UART_DRIVER=esp_idf` |
-| `DISPLAY` | `drivers/display_st7305.cmake` | `SOLAR_OS_BOARD_DISPLAY_DRIVER=st7305` |
-| `DISPLAY` | `drivers/display_ssd1683.cmake` | `SOLAR_OS_BOARD_DISPLAY_DRIVER=ssd1683` |
-| `DISPLAY` | `drivers/display_ili9341.cmake` | `SOLAR_OS_BOARD_DISPLAY_DRIVER=ili9341` |
-| `DISPLAY` | `drivers/display_cvbs_pal.cmake` | `SOLAR_OS_BOARD_DISPLAY_DRIVER=cvbs_pal` |
-| `SD` | `drivers/storage_sdmmc.cmake` | `SOLAR_OS_BOARD_STORAGE_DRIVER=sdmmc` |
-| `SD` | `drivers/storage_sdspi.cmake` | `SOLAR_OS_BOARD_STORAGE_DRIVER=sdspi` |
-| `I2C` | `drivers/i2c_esp_idf.cmake` | `SOLAR_OS_BOARD_I2C_DRIVER=esp_idf` |
-| `SPI` | `drivers/spi_esp_idf.cmake` | `SOLAR_OS_BOARD_SPI_DRIVER=esp_idf` |
-| `RTC` | `drivers/rtc_pcf85063.cmake` | `SOLAR_OS_BOARD_RTC_DRIVER=pcf85063` |
-| `TEMPERATURE`, `HUMIDITY` | `drivers/sensors_shtc3.cmake` | `SOLAR_OS_BOARD_SENSOR_DRIVER=shtc3` |
-| `AUDIO` | `drivers/audio_es8311_es7210.cmake` | `SOLAR_OS_BOARD_AUDIO_DRIVER=es8311_es7210` |
-| `AUDIO` | `drivers/audio_esp32_dac.cmake` | `SOLAR_OS_BOARD_AUDIO_DRIVER=esp32_dac` |
-| `GPIO` | `drivers/gpio_esp_idf.cmake` | `SOLAR_OS_BOARD_GPIO_DRIVER=esp_idf` |
-| `ADC` | `drivers/adc_esp_idf.cmake` | `SOLAR_OS_BOARD_ADC_DRIVER=esp_idf` |
-| `BATTERY` | `drivers/battery_adc.cmake` | `SOLAR_OS_BOARD_BATTERY_DRIVER=adc` |
-| `PWM` | `drivers/pwm_esp_idf.cmake` | `SOLAR_OS_BOARD_PWM_DRIVER=esp_idf` |
+The generated CMake and header files are private build artifacts. Inspect them
+when diagnosing a profile, but make source changes in the TOML manifest or the
+driver catalog.
 
 ## Capability Flags
 
@@ -241,6 +212,7 @@ The current capability flags are:
 | `AUDIO_INPUT` | Microphone/audio-input path is available. Usually paired with `AUDIO` on codec boards. |
 | `WIFI` | Wi-Fi station/AP services. |
 | `BLE` | BLE keyboard and BLE/GATT services. |
+| `PS2_KEYBOARD` | A board-integrated PS/2 keyboard bus is available. Requires `GPIO`. |
 | `GPIO` | Runtime-safe GPIO service. |
 | `ADC` | Runtime-safe ADC service. |
 | `PWM` | Runtime-safe PWM service. |
@@ -253,17 +225,19 @@ The current capability flags are:
 | `EXPANSION_I2S` | Board has a spare I2S controller and at least three runtime-safe output GPIOs for an external three-wire I2S device. |
 | `KEY` | Built-in board key for sleep/pairing control. |
 | `BUTTONS` | Built-in digital buttons are available for keyboard/app input. |
-| `JOYSTICK` | Built-in analog joystick axes are available for keyboard/app input. |
+| `JOYSTICK` | Built-in analog joystick axes are available as generic axis input. |
 | `ADC_DPAD` | Built-in ADC D-pad axes are available for keyboard/app input. |
 | `STATUS_LED` | Board status LED output is available. |
 | `DISPLAY_BRIGHTNESS` | Display backlight or brightness control is available. |
+| `POINTER` | Board-integrated absolute or relative pointing input. Events carry a source, pointer ID, display target, coordinates, deltas, buttons, and press/move/release action. |
+| `STREAMING_DISPLAY` | The board's primary display has a bounded-cadence raster-frame presenter suitable for animation or games. This is separate from ordinary terminal and GUI drawing. |
 | `TEMPERATURE` | Temperature sensor service. |
 | `HUMIDITY` | Humidity sensor service. |
 
 `src/CMakeLists.txt` validates that every enabled driver-backed capability has a
-matching selector, then consumes `SOLAR_OS_BOARD_SRCS` and
-`SOLAR_OS_BOARD_REQUIRES`. It does not know which concrete source files belong
-to ST7305, SDMMC, PCF85063, or any future driver.
+matching selector, then consumes direct board sources and required packages. It
+does not know which concrete source files belong to ST7305, SDMMC, PCF85063, or
+any future driver.
 
 Expansion capabilities are compile-time gates for external hardware packages.
 Use them when a package needs connector resources rather than an internal board
@@ -277,10 +251,12 @@ than `expansion_gpio` and prevents unusable drivers from entering a board build.
 The user-facing connector tables and attachment workflow live in
 [Expansion Ports](expansion.md).
 
-## Board Header
+## Generated Board Metadata
 
-`include/boards/<target>.h` contains C-visible board metadata and pin maps.
-Every board needs the identity macros:
+The manifest compiler emits the C-visible identity, pin, bus, connector, and
+fixed-device tables. The examples below describe that generated runtime
+contract. Do not create or edit `include/boards/<target>.h` for a manifest
+profile.
 
 ```c
 #pragma once
@@ -291,7 +267,9 @@ Every board needs the identity macros:
 #define SOLAR_OS_BOARD_MODULE_NAME "ESP32-S3-WROOM-1-N16R8"
 ```
 
-Add only the hardware macros that match enabled capabilities.
+Add board-specific compatibility macros to `[defines]` only when existing code
+requires them. Normal identity, capability, bus, connector, pin, and device
+metadata comes from dedicated manifest fields.
 
 UART example:
 
@@ -445,50 +423,38 @@ controllers are limited by `SOLAR_OS_BOARD_RUNTIME_UART_PORT_MASK`. An attached
 UART reserves its controller and pins, while its driver starts on first lease
 and stops on final release.
 
-## Board Selector
-
-Add the board define to `include/solar_os_board.h`:
-
-```c
-#if defined(SOLAR_OS_BOARD_WAVESHARE_ESP32_S3_RLCD_4_2)
-#include "boards/waveshare_esp32_s3_rlcd_4_2.h"
-#elif defined(SOLAR_OS_BOARD_ESP32_S3_DEVKITC1_N16R8)
-#include "boards/esp32_s3_devkitc1_n16r8.h"
-#elif defined(SOLAR_OS_BOARD_ODROID_GO)
-#include "boards/odroid_go.h"
-#elif defined(SOLAR_OS_BOARD_ELECROW_CROWPANEL_ESP32_S3_4_2_EPAPER)
-#include "boards/elecrow_crowpanel_esp32_s3_4_2_epaper.h"
-#elif defined(SOLAR_OS_BOARD_MY_BOARD)
-#include "boards/my_board.h"
-#else
-#error "No SolarOS board target selected. Build through a PlatformIO env with a matching boards/<target>.cmake profile."
-#endif
-```
-
-The define name must match `SOLAR_OS_BOARD_DEFINE` from the board profile.
-
 ## PlatformIO Environment
 
-Add an environment in `platformio.ini`:
+Inherited custom profiles normally use their base profile's environment, as
+shown in the TUI procedure. Add an environment only when an in-tree standalone
+target needs its own PlatformIO hardware, partition, or SDK configuration:
 
 ```ini
 [env:my_board]
-board = esp32-s3-devkitc-1
+board = esp32-s3-devkitc1-n16r8
 board_build.cmake_extra_args = -DSOLAR_OS_BOARD=my_board
 ```
 
 `board` is the PlatformIO hardware definition. `SOLAR_OS_BOARD` is the SolarOS
-profile name under `boards/<target>.cmake`.
+manifest name under `boards/manifests/<target>.toml`.
 
 When the PlatformIO environment name and SolarOS board profile name are the same,
 the CMake argument is still preferred because it removes ambiguity and makes
 alias environments possible.
 
-Examples:
+For an inherited custom profile, build and upload through its base environment
+while selecting the profile explicitly:
+
+```sh
+SOLAR_OS_BOARD=my_board pio run -e esp32_s3_devkitc1_n16r8
+SOLAR_OS_BOARD=my_board pio run -e esp32_s3_devkitc1_n16r8 -t upload
+```
+
+For a standalone target with its own `[env:my_board]` entry, the environment
+already selects the profile:
 
 ```sh
 pio run -e my_board
-pio run -e odroid_go
 pio run -e my_board -t upload
 pio device monitor -b 115200
 ```
@@ -502,12 +468,41 @@ board = odroid_esp32
 board_build.cmake_extra_args = -DSOLAR_OS_BOARD=odroid_go -DSDKCONFIG_DEFAULTS=sdkconfig.defaults.odroid_go
 ```
 
+## Update Layouts
+
+`os_builder` selects an update layout after board selection. This choice fixes
+the partition table and application-image limit; internal storage size is not a
+separate user setting.
+
+| Flash | OTA updates | Serial updates |
+| --- | --- | --- |
+| 16 MiB | Two 0x700000-byte (7 MiB) app slots and 0x1F0000 bytes of internal storage | One 0xE00000-byte (14 MiB) app slot and 0x1F0000 bytes of internal storage |
+| 8 MiB | Two 0x3E0000-byte (3.875 MiB) app slots and 0x20000 bytes (128 KiB) of internal storage | One 0x700000-byte (7 MiB) app slot and 0xF0000 bytes (960 KiB) of internal storage |
+| 4 MiB | Not available | One 0x3D0000-byte app slot and 0x20000 bytes (128 KiB) of internal storage |
+
+The OTA layout also includes the internal OTA service and its dependencies.
+The service is not a flavor group. The serial layout does not add it, although
+another selected feature can still depend on the shared OTA implementation.
+Changing layouts changes the partition table, so install the first image for a
+new layout through serial flashing. Do not switch a deployed device's layout
+with an ordinary OTA update.
+
+For a direct PlatformIO build outside `os_builder`, set `SOLAR_OS_LAYOUT`:
+
+```sh
+SOLAR_OS_LAYOUT=single pio run -e waveshare_esp32_s3_rlcd_4_2
+```
+
+If it is omitted, 8 MiB and 16 MiB environments use the OTA layout and 4 MiB
+environments use their fixed serial layout.
+
 ## Freenove ESP32-WROVER v3.0
 
 The `freenove_esp32_wrover_v3` target covers the FNK0060 v3.0 board with an
 ESP32-WROVER-E-N4R8 module, 4 MB flash, 8 MB physical PSRAM, a CH340 USB-to-UART
 bridge, and the rear microSD slot. It uses `uart0` on GPIO1/GPIO3 as the boot
-shell and one-bit SDMMC on GPIO14 clock, GPIO15 command, and GPIO2 data.
+shell and a fixed `storage0` one-bit SDMMC attachment on GPIO14 clock, GPIO15
+command, and GPIO2 data.
 The active-low BOOT button on GPIO0 is also the SolarOS KEY. A short press uses
 the configured sleep or suspend action; another short press resumes from
 suspend. A long press forgets the remembered BLE
@@ -544,35 +539,29 @@ Omit `SOLAR_OS_CVBS_MODE` (or set it to `384x288`) to build the default full
 PAL mode. Composite scanout requires the ESP32's full 240 MHz clock, so SolarOS
 clamps all power profiles to that board-specific CPU floor on this target.
 
-For the Game Boy-focused build, use the full 384x288 PAL mode:
+Use `os_builder` with the `rover` baseline to make a specialized Game Boy or
+Synth image. Add the required group, remove unrelated groups until the measured
+image fits, then build and flash from the same TUI:
 
 ```sh
-SOLAR_OS_FLAVOR=rover-retro pio run -e freenove_esp32_wrover_v3
+python3 scripts/os_builder.py \
+  --input flavors/rover.toml \
+  --board freenove_esp32_wrover_v3 \
+  --layout single
 ```
 
-This flavor uses the normal system-service baseline and includes BLE keyboard
-input, SD access, UART ports, hardware I/O, Files, basic maintenance apps, Log,
-Bridge, Wi-Fi, and the SSH/SCP clients. It keeps the rest of the network stack
-and unrelated application groups disabled so they do not compete with PAL
-scanout and emulation. For serial diagnostics, run:
+The default full PAL mode gives Game Boy the largest image. The 320x200
+safe-area mode also supports Game Boy; its presenter selects a smaller centered
+raster. For serial diagnostics, run:
 
 ```text
 job start log uart0 debug
 ```
 
-It is silent because composite scanout owns I2S0. Do not combine
-`rover-retro` with `SOLAR_OS_CVBS_MODE=320x200`; the Game Boy image is 320x288.
-
-For the focused Synth build, use:
-
-```sh
-SOLAR_OS_FLAVOR=rover-synth pio run -e freenove_esp32_wrover_v3
-```
-
-`rover-synth` keeps BLE and PS/2 keyboard input, MIDI, controls, storage, and
-basic file tools. It omits Wi-Fi/networking and unrelated application stacks
-to retain classic-ESP32 internal memory for Bluetooth and real-time audio.
-Attach an LEDC PWM audio output at runtime because PAL scanout owns I2S0:
+It is silent because composite scanout owns I2S0. For a custom Synth image,
+retain BLE, MIDI, controls, storage, basic file tools, Synth, and the PWM audio
+driver while removing unrelated stacks. Attach an LEDC PWM audio output at
+runtime because PAL scanout owns I2S0:
 
 ```text
 expansion attach audio-pwm audio pwm=gpio26
@@ -592,10 +581,88 @@ PWM and can form runtime I2C, SPI, UART, or 1-Wire buses. UART0 remains
 registered on the CH340 pins and cannot be detached by the shell using it.
 
 The board uses `partitions_4mb.csv`, with one 0x3D0000-byte factory application
-slot and a 0x20000-byte (128 KiB) flash filesystem. The board-specific `rover`,
-`rover-python`, `rover-lua`, `rover-synth`, and `rover-retro` flavors do not use
-a dual-OTA layout on 4 MB flash. Install firmware through the CH340 serial
-connection; this partition layout does not support on-device OTA updates.
+slot and a 0x20000-byte (128 KiB) flash filesystem. A dual-OTA layout is not
+available on 4 MB flash. Install firmware through the CH340 serial connection;
+this partition layout does not support on-device OTA updates.
+
+## LilyGO TTGO VGA32 v1.4
+
+The `ttgo_vga32_v14` target covers the ESP32-PICO-D4 VGA32 revision 1.4 with
+8 MB external PSRAM. It uses the onboard RGB222 resistor DAC for VGA, the
+USB-UART bridge on UART0, mono ESP32 DAC audio on GPIO25, a PS/2 keyboard on
+GPIO32/GPIO33, and the revision 1.4 microSD wiring on HSPI: MOSI GPIO12, MISO
+GPIO2, clock GPIO14, and chip select GPIO13. These SD pins differ from the older
+revision 1.2 board.
+
+VGA scanout continuously streams a short line ring through I2S1 DMA. A level-3
+IRAM interrupt on CPU1 refills completed line groups. Frame submissions are
+coalesced, and a CPU1 presentation worker converts the newest monochrome
+snapshot into the scanout buffer at a bounded rate. The SolarOS canvas stays
+monochrome, while a lookup table expands the configured foreground and
+background colors to the board's two-bit-per-channel VGA output. I2S1 and the
+VGA GPIOs remain fixed resources while the display is active.
+
+The onboard audio path takes the ESP32 DAC1 signal from GPIO25 and routes the
+same mono output to the 3.5 mm jack and the NS4150 speaker amplifier. SolarOS
+uses the shared ESP32-DAC backend at 16 kHz. This is output-only hardware; the
+board does not advertise microphone or audio-input support. Test it with
+`audio tone 880 500`.
+
+The default mode is 640x480@60 Hz. Select another mode at build time with
+`SOLAR_OS_VGA_MODE`:
+
+```sh
+pio run -e ttgo_vga32_v14
+SOLAR_OS_VGA_MODE=320x200 pio run -e ttgo_vga32_v14
+SOLAR_OS_VGA_MODE=320x240 pio run -e ttgo_vga32_v14
+SOLAR_OS_VGA_MODE=640x400 pio run -e ttgo_vga32_v14
+```
+
+The 320x200 and 320x240 modes use double scan and two internal monochrome
+scanout buffers. The 320x240 mode derives its 60 Hz timing from 640x480 VGA.
+The 640x400@70 Hz and 640x480@60 Hz modes use the standard 25.175 MHz VGA pixel
+clock and one internal monochrome scanout buffer to preserve heap for SolarOS.
+Updating a high-resolution frame can therefore produce a brief tear while the
+new image is copied. Changing `SOLAR_OS_VGA_MODE` causes PlatformIO to
+reconfigure CMake automatically.
+
+The board has 4 MB flash, so its PlatformIO environment defaults to the focused
+`rover` flavor instead of `full`:
+
+```sh
+pio run -e ttgo_vga32_v14
+```
+
+To create a compact Game Boy or another specialized build, start from `rover`
+in `os_builder`, adjust the granular groups, and build against this board's
+single-image limit:
+
+```sh
+python3 scripts/os_builder.py \
+  --input flavors/rover.toml \
+  --board ttgo_vga32_v14 \
+  --layout single
+```
+
+The board profile declares `ps2kbd0` and creates the default `keyboard0`
+`ps2-keyboard` expansion attachment before the shell. Its topology and input
+state remain visible through the generic commands:
+
+```text
+expansion devices
+input keyboard
+input test keyboard0
+```
+
+BLE remains available but defaults to off on this board to preserve internal
+heap. Use `setterm ble on` and reboot to enable it. `setterm ble default` clears
+the user override and restores the board default.
+
+The onboard PS/2 mouse connector is registered as the fixed `ps2mouse0` bus.
+Attach a mouse when one is connected with `expansion attach ps2-mouse mouse0
+ps2=ps2mouse0`; it is not a default attachment because the connector can be
+empty. The microSD signals are fixed board resources; GPIO34 and GPIO39 are the
+only header pins available for runtime GPIO/ADC, and both are input-only.
 
 ## ODROID-GO
 
@@ -607,6 +674,11 @@ buttons, ADC D-pad input, status LED, PWM display brightness, Wi-Fi, and BLE.
 The board does not have CDC, I2C, RTC, onboard temperature/humidity sensors, or
 audio input enabled. It boots into the display shell, and `uart0` on GPIO1/GPIO3
 is available as the serial byte-stream port.
+
+The ILI9341 backend plans changed monochrome tile runs, INDEX8 GUI tiles, and
+INDEX2 game rasters separately, then sends all three through the same queued
+two-line DMA pump. Game Boy uses a centered 240x216 raster at 30 presentation
+frames per second so RGB565 transfer stays below the shared-SPI pixel budget.
 
 ODROID-GO uses the shared VSPI bus for the TFT, SD card, and external chip
 selects:
@@ -628,12 +700,53 @@ buttons.
 GPIO25 is amplifier enable/shutdown wiring, not a second SolarOS DAC channel.
 Treat GPIO26 as the only DAC sample output for ODROID-GO audio.
 
+## Freenove ESP32-S3 Display 4.0-inch
+
+The `freenove_esp32_s3_display_4_0` target supports the capacitive-touch
+FNK0104S board. SolarOS runs its portrait 320x480 ST7796 panel as a 480x320
+landscape primary display and controls the active-high GPIO45 backlight with
+PWM. The FT6336 touch controller shares `i2c0` with the ES8311 codec and emits
+generic absolute pointer events targeted at `display0`. Native apps opt in with
+`SOLAR_OS_APP_FLAG_POINTER_EVENTS`; pointer events include press, move, and
+release state rather than exposing FT6336 registers to applications. Foreground
+Python and Lua apps receive the same routed events through `solaros.input`.
+The board profile creates this as the default `ft6336` expansion attachment
+named `touch0`; inspect it with `expansion devices`, `input touch`, and `input
+test touch0`. Optional logical-range correction is stored with `input calibrate
+touch0 ...`.
+
+The ST7796 backend uses the same changed-region planner and queued two-line DMA
+pump for monochrome terminal, INDEX8 GUI, and INDEX2 game content. A full
+320x288 Game Boy image would leave too little margin on the 40 MHz RGB565 SPI
+link, so the presenter selects a centered 240x216 raster at 25 frames per
+second.
+
+The ES8311 is configured as one duplex codec: GPIO8 carries playback data to
+the codec, GPIO6 carries microphone data to the ESP32-S3, and GPIO1 controls
+the active-low speaker amplifier. The SD slot is the fixed four-bit SDMMC
+attachment `storage0`. Battery
+voltage is measured on GPIO9 through the board divider. The TP4054 circuit is
+an analog charger, not a digitally addressable fuel gauge or battery manager.
+
+Expansion wiring is divided across three connectors. `uart0` uses GPIO43 and
+GPIO44. The I2C connector exposes GPIO16 SDA and GPIO15 SCL. The GPIO connector
+exposes runtime-safe GPIO2, GPIO3, GPIO14, and GPIO21. Current Freenove FNK0104S
+documentation identifies the third GPIO signal as GPIO14; GPIO4 is fixed as
+the ES8311 MCLK signal. The BOOT button on GPIO0 becomes the SolarOS KEY after
+startup; do not hold it during reset because it selects download mode.
+
+Build the target with:
+
+```sh
+pio run -e freenove_esp32_s3_display_4_0
+```
+
 ## Elecrow CrowPanel ESP32-S3 4.2-inch E-paper
 
 The built-in `elecrow_crowpanel_esp32_s3_4_2_epaper` target covers Elecrow's
 V1.0 400x300 monochrome CrowPanel. It uses an ESP32-S3-WROOM-1-N8R8 module,
 the SSD1683 e-paper driver, microSD over a dedicated SDSPI bus, five digital
-controls, a status LED, Wi-Fi, BLE, and an 8 MB dual-OTA partition layout.
+controls, a status LED, Wi-Fi, BLE, and selectable OTA or serial-update layouts.
 
 Elecrow has shipped both the original panel and a newer panel identified by a
 green circular sticker on the back. The newer revision keeps the same GPIO
@@ -678,8 +791,10 @@ The panel and storage wiring remains internal board wiring:
   SD-power enable.
 - GPIO41: active-high status LED.
 
-The target uses `partitions_8mb.csv`, with two 0x3B0000-byte OTA application
-slots and a 0x90000-byte flash filesystem partition.
+The default OTA layout uses `partitions_8mb.csv`, with two 0x3E0000-byte OTA
+application slots and a 0x20000-byte flash filesystem partition. The serial
+layout uses `partitions_8mb_single.csv`, with one 0x700000-byte factory slot and
+a 0xF0000-byte flash filesystem partition.
 
 ## Headless Boards
 
@@ -714,14 +829,10 @@ Its active-low BOOT button on GPIO0 is also the SolarOS KEY for the configured
 short-press sleep/suspend action, light-sleep wake, and long-press BLE keyboard
 replacement. GPIO0 remains reserved from runtime routing. Do not hold the
 button during reset or power-up, because that selects download boot mode.
-The N16R8 target uses `partitions_16mb_devkit.csv`: each OTA application slot
-is 0x600000 bytes and the internal FAT filesystem partition is 0x3F0000 bytes.
-The larger local volume supports durable agent conversations and normal file
-workflows without an SD card. Moving an existing device from the old shared
-layout relocates and reformats its internal filesystem on first boot, so copy
-needed files off the device before flashing. The transition requires a serial
-flash because OTA does not replace the installed partition table; NVS
-configuration remains in the unchanged NVS partition.
+The N16R8 target defaults to the common 16 MiB OTA `partitions.csv` layout. Its
+serial alternative uses `partitions_16mb_single.csv`. Both retain the same
+0x1F0000-byte internal volume for durable agent conversations and normal file
+workflows without an SD card.
 The board also permits runtime routing on the spare SPI3 host. Static `spi0`
 remains the usual choice; the runtime host is useful for isolated experiments
 on another set of routable expansion pins.
@@ -774,8 +885,8 @@ Use a revision-specific board profile if one of those pins must be exposed.
 ## Display Boards
 
 For a board-integrated primary display, enable both `DISPLAY` and `GFX`, include
-the display fragment, and provide the controller pin macros expected by the
-selected driver:
+the display fragment, and declare the packaged driver as an immutable early
+`display0` attachment in the board header:
 
 ```cmake
 include("${CMAKE_CURRENT_LIST_DIR}/drivers/display_st7305.cmake")
@@ -820,31 +931,34 @@ The built-in ODROID-GO target uses the ILI9341 TFT driver on the board VSPI bus:
 #define SOLAR_OS_BOARD_PIN_LCD_BL GPIO_NUM_14
 ```
 
-The Elecrow CrowPanel target uses the SSD1683 e-paper driver on a dedicated SPI
-host:
+The Elecrow CrowPanel target exposes its SSD1683 e-paper controller as a fixed
+early `display0` expansion attachment on the board-defined `spi0` bus:
 
 ```c
-#define SOLAR_OS_BOARD_DISPLAY_CONTROLLER "SSD1683"
-#define SOLAR_OS_BOARD_DISPLAY_SSD1683_PANEL_VARIANT EPD_SSD1683_PANEL_UNKNOWN
-#define SOLAR_OS_BOARD_DISPLAY_WIDTH 400
-#define SOLAR_OS_BOARD_DISPLAY_HEIGHT 300
-
-#define SOLAR_OS_BOARD_PIN_LCD_SCK GPIO_NUM_12
-#define SOLAR_OS_BOARD_PIN_LCD_MOSI GPIO_NUM_11
-#define SOLAR_OS_BOARD_PIN_LCD_RST GPIO_NUM_47
-#define SOLAR_OS_BOARD_PIN_LCD_DC GPIO_NUM_46
-#define SOLAR_OS_BOARD_PIN_LCD_CS GPIO_NUM_45
-#define SOLAR_OS_BOARD_PIN_LCD_BUSY GPIO_NUM_48
-#define SOLAR_OS_BOARD_PIN_LCD_POWER GPIO_NUM_7
+#define SOLAR_OS_BOARD_DEFAULT_EXPANSION_DEVICES { \
+    { \
+        .driver = "ssd1683", \
+        .name = "display0", \
+        .binding_count = 8, \
+        .bindings = { \
+            {SOLAR_OS_EXPANSION_BINDING_SPI_BUS, .target = "spi0"}, \
+            {SOLAR_OS_EXPANSION_BINDING_SPI_CS, .target = "spi0", .value = 45}, \
+            {SOLAR_OS_EXPANSION_BINDING_GPIO, "dc", .value = 46}, \
+            {SOLAR_OS_EXPANSION_BINDING_GPIO, "reset", .value = 47}, \
+            {SOLAR_OS_EXPANSION_BINDING_GPIO, "busy", .value = 48}, \
+            {SOLAR_OS_EXPANSION_BINDING_GPIO, "power", .value = 7}, \
+            {SOLAR_OS_EXPANSION_BINDING_PARAMETER, "clock", .value = 10000}, \
+            {SOLAR_OS_EXPANSION_BINDING_PARAMETER, "panel", .value = 0}, \
+        }, \
+    }, \
+}
 ```
 
-Every board that selects `drivers/display_ssd1683.cmake` must define
-`SOLAR_OS_BOARD_DISPLAY_SSD1683_PANEL_VARIANT`. Use
-`EPD_SSD1683_PANEL_UNKNOWN` only when the board can contain either supported
-Elecrow panel revision and needs BUSY-based detection. A board built around the
-Waveshare 4.2-inch V2 module must select
-`EPD_SSD1683_PANEL_WAVESHARE_V2` explicitly. The other fixed values are
-`EPD_SSD1683_PANEL_LEGACY` and `EPD_SSD1683_PANEL_GREEN_STICKER`.
+The fixed bindings select GPIO12 SCK, GPIO11 MOSI, GPIO45 CS, GPIO46 D/C,
+GPIO47 reset, GPIO48 BUSY, GPIO7 display power, a 10 MHz SPI clock, and the
+automatic Elecrow panel profile. That profile detects the original or
+green-sticker revision from BUSY behavior and defaults to rotation 2. Runtime
+Waveshare V2 attachments use panel profile 3, rotation 0, and 2 MHz by default.
 
 Its `refresh=auto` default performs fast updates, skips unchanged frames, and
 inserts a full waveform on the first update and after every 19 fast updates to
@@ -858,60 +972,56 @@ The runtime path is:
 
 ```text
 main.c
-  -> solar_os_board_display_*
-    -> board/solar_os_board_display_<driver>.c
+  -> early fixed expansion attachments
+    -> services/solar_os_<controller>_display.c
       -> drivers/<concrete_display_driver>.c
+      -> generic board-display backend for display0
   -> solar_os_display target display0
 ```
 
-`main.c`, terminal, and graphics services should not include concrete display
-driver headers.
-
-The board panel is registered with the display service as a target with
-`source=board` and `role=primary`. Expansion display drivers should remain
-expansion drivers for attach/probe/resource management, then register their own
-display targets with `source=expansion` when attached.
+`main.c`, terminal, and graphics services do not include concrete display
+driver headers. A board panel is listed as a fixed expansion device and is
+registered with the display service as `display0`, `source=board`, and
+`role=primary`. When that controller driver is not already attached, a runtime
+attachment uses another name and registers an auxiliary target with
+`source=expansion`. Each of these controller drivers supports one attached
+instance at a time.
 
 ## Storage, I2C, Sensors, RTC, And Audio
 
-Enable these capabilities only when the board profile includes the matching
-driver fragment and the board header defines the required bus and pin metadata:
+Declare built-in peripherals as fixed devices using the same catalog entries as
+runtime expansions. Add the protocol backends that their static buses need and
+use `storage_expansion` for either SDMMC or SDSPI:
 
-```cmake
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/storage_sdmmc.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/storage_sdspi.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/i2c_esp_idf.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/rtc_pcf85063.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/battery_adc.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/audio_es8311_es7210.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/audio_esp32_dac.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/drivers/sensors_shtc3.cmake")
+```toml
+[build]
+drivers = ["storage_expansion", "i2c_esp_idf", "spi_esp_idf"]
+capabilities = ["sd", "i2c", "spi", "expansion_i2c", "expansion_spi"]
+
+[[buses]]
+name = "i2c0"
+protocol = "i2c"
+sharing = "shared"
+port = "I2C_NUM_0"
+sda = 13
+scl = 14
+
+[[devices]]
+driver = "sdmmc"
+name = "storage0"
+bindings = { clk = 38, cmd = 21, d0 = 39 }
 ```
 
-```c
-#define SOLAR_OS_BOARD_I2C_PORT I2C_NUM_0
-#define SOLAR_OS_BOARD_PIN_I2C_SDA GPIO_NUM_13
-#define SOLAR_OS_BOARD_PIN_I2C_SCL GPIO_NUM_14
-
-#define SOLAR_OS_BOARD_PIN_SDMMC_CLK GPIO_NUM_38
-#define SOLAR_OS_BOARD_PIN_SDMMC_CMD GPIO_NUM_21
-#define SOLAR_OS_BOARD_PIN_SDMMC_D0 GPIO_NUM_39
-
-#define SOLAR_OS_BOARD_PIN_BATTERY_ADC GPIO_NUM_4
-#define SOLAR_OS_BOARD_BATTERY_ADC_DIVIDER_RATIO 3.0f
-```
-
-SDSPI boards provide the shared SPI bus metadata and an SD-card chip select
-instead of SDMMC pins. The ODROID-GO target uses VSPI on GPIO18/GPIO19/GPIO23
-and `SOLAR_OS_BOARD_PIN_SD_CARD_CS` on GPIO22.
-Boards with a switched card supply can additionally define
+SDSPI uses a named SPI bus and `bindings = { spi = "spi0", cs = 22 }` instead.
+The package driver consumes the fixed-device bindings and is not selected
+through board-pin `#ifdef` branches. Boards with a switched card supply can
+additionally define
 `SOLAR_OS_BOARD_PIN_SD_POWER` and `SOLAR_OS_BOARD_SD_POWER_ACTIVE_LEVEL`; the
 shared storage adapter enables that rail before probing or mounting the card.
 
-Audio codec boards also need I2S and codec power/pin metadata. See the
-Waveshare board header for the complete ES8311/ES7210 example. ESP32 DAC boards
-instead define the DAC sample output and optional amplifier-enable pin; the
-ODROID-GO target uses GPIO26 for DAC output and GPIO25 for amplifier enable.
+RTC, sensor, battery, and audio devices follow the same rule. See the Waveshare
+manifest for PCF85063, SHTC3, battery ADC, and ES8311/ES7210 examples. See the
+ODROID-GO manifest for ESP32 DAC output and amplifier-enable bindings.
 
 The runtime path follows the same pattern as display:
 

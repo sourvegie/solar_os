@@ -26,6 +26,8 @@ extern "C" {
 #include "solar_os_identity.h"
 #include "solar_os_memory.h"
 #include "solar_os_messaging.h"
+#include "solar_os_meshcore_channel_key.h"
+#include "solar_os_meshcore_stream.h"
 #include "solar_os_radio.h"
 #include "solar_os_time.h"
 }
@@ -47,6 +49,8 @@ constexpr uint32_t kRadioSendTimeoutFloorMs = 3000U;
 constexpr uint8_t kMetadataVersion = 1U;
 constexpr uint8_t kMetadataPathInbound = 1U << 0;
 constexpr uint8_t kMetadataPathOutbound = 1U << 1;
+static_assert(SOLAR_OS_MESHCORE_STREAM_ENVELOPE_MAX <= UINT8_MAX,
+              "MeshCore stream envelope must fit a request payload");
 
 struct MeshcoreMetadata {
     uint8_t version;
@@ -576,6 +580,7 @@ public:
         if (contacts_error != ESP_OK) {
             last_error_ = contacts_error;
         }
+        processStreamOutbound();
         BaseChatMesh::loop();
         finishGroupIfSent();
         if (!direct_.active && !group_.active) {
@@ -798,11 +803,15 @@ protected:
                              uint8_t length,
                              uint8_t *reply) override
     {
-        (void)contact;
         (void)sender_timestamp;
-        (void)data;
-        (void)length;
         (void)reply;
+        if (solar_os_meshcore_stream_envelope_matches(data, length)) {
+            (void)solar_os_meshcore_stream_ingest(
+                contact.id.pub_key,
+                data,
+                length,
+                (uint32_t)solar_os_time_uptime_ms());
+        }
         return 0;
     }
 
@@ -885,6 +894,46 @@ protected:
     }
 
 private:
+    void processStreamOutbound()
+    {
+        solar_os_meshcore_stream_process(
+            (uint32_t)solar_os_time_uptime_ms());
+        solar_os_endpoint_id_t endpoint_id = SOLAR_OS_ENDPOINT_ID_NONE;
+        uint8_t envelope[SOLAR_OS_MESHCORE_STREAM_ENVELOPE_MAX]{};
+        size_t envelope_len = 0U;
+        const esp_err_t take = solar_os_meshcore_stream_take_tx(
+            &endpoint_id,
+            envelope,
+            sizeof(envelope),
+            &envelope_len);
+        if (take == ESP_ERR_TIMEOUT || take == ESP_ERR_INVALID_STATE) {
+            return;
+        }
+        if (take != ESP_OK) {
+            last_error_ = take;
+            return;
+        }
+        ContactInfo *contact = lookupTrustedContactForEndpoint(endpoint_id);
+        if (contact == nullptr) {
+            solar_os_meshcore_stream_note_tx(
+                endpoint_id, ESP_ERR_INVALID_STATE);
+            return;
+        }
+        uint32_t tag = 0U;
+        uint32_t timeout = 0U;
+        const int result = sendRequest(
+            *contact,
+            envelope,
+            (uint8_t)envelope_len,
+            tag,
+            timeout);
+        (void)tag;
+        (void)timeout;
+        solar_os_meshcore_stream_note_tx(
+            endpoint_id,
+            result == MSG_SEND_FAILED ? ESP_ERR_NO_MEM : ESP_OK);
+    }
+
     esp_err_t reloadContacts(bool force)
     {
         solar_os_contacts_status_t before{};
@@ -1003,6 +1052,19 @@ private:
             endpoint.provider != SOLAR_OS_MESSAGING_PROVIDER_MESHCORE ||
             endpoint.address.length != PUB_KEY_SIZE ||
             endpoint.trust == SOLAR_OS_CONTACT_TRUST_BLOCKED) {
+            return nullptr;
+        }
+        return lookupContactByPubKey(endpoint.address.bytes, PUB_KEY_SIZE);
+    }
+
+    ContactInfo *lookupTrustedContactForEndpoint(
+        solar_os_endpoint_id_t endpoint_id)
+    {
+        solar_os_endpoint_t endpoint{};
+        if (solar_os_contacts_get_endpoint(endpoint_id, &endpoint) != ESP_OK ||
+            endpoint.provider != SOLAR_OS_MESSAGING_PROVIDER_MESHCORE ||
+            endpoint.address.length != PUB_KEY_SIZE ||
+            endpoint.trust != SOLAR_OS_CONTACT_TRUST_TRUSTED) {
             return nullptr;
         }
         return lookupContactByPubKey(endpoint.address.bytes, PUB_KEY_SIZE);
@@ -1567,6 +1629,9 @@ extern "C" esp_err_t solar_os_meshcore_init(void)
         error = solar_os_messaging_init();
     }
     if (error == ESP_OK) {
+        error = solar_os_meshcore_stream_init();
+    }
+    if (error == ESP_OK) {
         error = solar_os_messaging_provider_register(
             SOLAR_OS_MESSAGING_PROVIDER_MESHCORE, "meshcore");
     }
@@ -1818,9 +1883,11 @@ extern "C" esp_err_t solar_os_meshcore_channel_add(
     const char *base64_psk)
 {
     ESP_RETURN_ON_ERROR(solar_os_meshcore_init(), "meshcore", "init failed");
+    const bool hashtag = name != nullptr && name[0] == '#';
     if (!text_valid(name, SOLAR_OS_MESHCORE_GROUP_NAME_MAX, false) ||
         strcmp(name, SOLAR_OS_MESHCORE_PUBLIC_GROUP) == 0 ||
-        base64_psk == nullptr) {
+        (hashtag && (name[1] == '\0' || base64_psk != nullptr)) ||
+        (!hashtag && base64_psk == nullptr)) {
         return ESP_ERR_INVALID_ARG;
     }
     StoppedTransition transition;
@@ -1848,8 +1915,17 @@ extern "C" esp_err_t solar_os_meshcore_channel_add(
     }
     uint8_t secret[PUB_KEY_SIZE]{};
     size_t secret_length = 0;
-    esp_err_t error = solar_os_crypto_base64_decode(
-        base64_psk, secret, sizeof(secret), &secret_length);
+    esp_err_t error = ESP_OK;
+    if (hashtag) {
+        if (!solar_os_meshcore_channel_key_derive_hashtag(name, secret)) {
+            error = ESP_ERR_INVALID_ARG;
+        } else {
+            secret_length = SOLAR_OS_MESHCORE_HASHTAG_KEY_LEN;
+        }
+    } else {
+        error = solar_os_crypto_base64_decode(
+            base64_psk, secret, sizeof(secret), &secret_length);
+    }
     if (error == ESP_OK && secret_length != 16U && secret_length != 32U) {
         error = ESP_ERR_INVALID_SIZE;
     }
@@ -2065,6 +2141,13 @@ extern "C" esp_err_t solar_os_meshcore_start(const char *radio,
                                     identity_length,
                                     channels,
                                     channel_count);
+    if (error == ESP_OK &&
+        identity_length >= PRV_KEY_SIZE + PUB_KEY_SIZE) {
+        error = solar_os_meshcore_stream_transport_start(
+            identity + PRV_KEY_SIZE);
+    } else if (error == ESP_OK) {
+        error = ESP_ERR_INVALID_SIZE;
+    }
     solar_os_credentials_wipe(identity, sizeof(identity));
     if (error == ESP_OK) {
         upsert_group_conversations(channels, channel_count);
@@ -2074,6 +2157,7 @@ extern "C" esp_err_t solar_os_meshcore_start(const char *radio,
                                   sizeof(channels[index].secret));
     }
     if (error != ESP_OK) {
+        solar_os_meshcore_stream_transport_stop();
         context->~MeshcoreContext();
         solar_os_memory_free(memory);
         (void)solar_os_radio_handle_configure(&handle, &saved.config);
@@ -2208,6 +2292,7 @@ extern "C" void solar_os_meshcore_stop(void)
     service.status.running = false;
     service.status.generation++;
     unlock_service();
+    solar_os_meshcore_stream_transport_stop();
     solar_os_radio_handle_t handle = context->radio.handle();
     (void)solar_os_radio_handle_set_state(
         &handle, SOLAR_OS_RADIO_STATE_STANDBY);

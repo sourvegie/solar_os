@@ -3,7 +3,7 @@ CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Werror
 
 ROOT := ../..
 WRITER_DIR := $(ROOT)/src/apps
-TARGETS := writer_buffer_test writer_files_test doc_layout_test shell_parse_test shell_launch_test shell_line_test app_file_types_test gameboy_support_test storage_mounts_test keys_test input_test board_caps_test hid_keyboard_report_test ps2_keyboard_test cardkb_codec_test midi_codec_test parameters_test controls_test dsp_test stream_test audio_codec_test webradio_catalog_test nvs_backup_test agent_reference_test terminal_geometry_test tui_widgets_test wireguard_crypto_test
+TARGETS := writer_buffer_test writer_files_test sketch_canvas_test text_search_test doc_layout_test shell_parse_test shell_launch_test shell_line_test shell_completion_test shell_diag_test scheduler_test script_lifecycle_test app_file_types_test gameboy_support_test storage_mounts_test json_scan_test keys_test input_test board_caps_test hid_keyboard_report_test ble_keyboard_scan_policy_test ps2_keyboard_test ps2_mouse_test cardkb_codec_test midi_codec_test midi_service_test parameters_test controls_test osc_test dsp_test stream_test resources_test audio_codec_test webradio_catalog_test gif_decode_stack_test nvs_backup_test agent_reference_test terminal_geometry_test app_exit_result_test terminal_preferences_test tui_widgets_test wireguard_crypto_test meshcore_channel_key_test meshcore_stream_codec_test time_timezone_test
 
 MANUAL_GENERATED_DIR := generated/solar_os
 MANUAL_GENERATED_HEADER := $(MANUAL_GENERATED_DIR)/solar_os_manual_data.h
@@ -27,6 +27,14 @@ writer_files_test: writer_files_test.c $(WRITER_DIR)/solar_os_writer_files.c $(W
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -I. -I$(ROOT)/src/services -I$(WRITER_DIR) \
 		writer_files_test.c $(WRITER_DIR)/solar_os_writer_files.c -o $@
 
+sketch_canvas_test: sketch_canvas_test.c $(WRITER_DIR)/solar_os_sketch_canvas.c $(WRITER_DIR)/solar_os_sketch_canvas.h esp_err.h
+	$(CC) $(CFLAGS) -I. -I$(WRITER_DIR) \
+		sketch_canvas_test.c $(WRITER_DIR)/solar_os_sketch_canvas.c -o $@
+
+text_search_test: text_search_test.c $(ROOT)/src/services/solar_os_text_search.c $(ROOT)/src/services/solar_os_text_search.h
+	$(CC) $(CFLAGS) -I$(ROOT)/src/services \
+		text_search_test.c $(ROOT)/src/services/solar_os_text_search.c -o $@
+
 shell_parse_test: shell_parse_test.c $(ROOT)/src/shell/solar_os_shell_parse.c $(ROOT)/src/shell/solar_os_shell_parse.h
 	$(CC) $(CFLAGS) -I$(ROOT)/src/shell \
 		shell_parse_test.c $(ROOT)/src/shell/solar_os_shell_parse.c -o $@
@@ -38,6 +46,25 @@ shell_launch_test: shell_launch_test.c $(ROOT)/src/shell/solar_os_shell_launch.c
 shell_line_test: shell_line_test.c $(ROOT)/src/shell/solar_os_shell_line.c $(ROOT)/src/shell/solar_os_shell_line.h
 	$(CC) $(CFLAGS) -I$(ROOT)/src/shell \
 		shell_line_test.c $(ROOT)/src/shell/solar_os_shell_line.c -o $@
+
+shell_completion_test: shell_completion_test.c $(ROOT)/src/shell/solar_os_shell_completion.c $(ROOT)/src/shell/solar_os_shell_completion.h
+	$(CC) $(CFLAGS) -I$(ROOT)/src/shell \
+		shell_completion_test.c $(ROOT)/src/shell/solar_os_shell_completion.c -o $@
+
+shell_diag_test: shell_diag_test.c $(ROOT)/src/shell/solar_os_shell_common.c $(ROOT)/src/shell/solar_os_shell_common.h $(ROOT)/src/shell/solar_os_shell_io.h
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -ffunction-sections -fdata-sections \
+		-include compat.h -I. -I$(ROOT)/src -I$(ROOT)/src/services \
+		-I$(ROOT)/src/shell \
+		shell_diag_test.c $(ROOT)/src/shell/solar_os_shell_common.c \
+		-Wl,--gc-sections -o $@
+
+scheduler_test: scheduler_test.c $(ROOT)/src/solar_os_scheduler.c $(ROOT)/src/solar_os_scheduler.h esp_timer.h
+	$(CC) $(CFLAGS) -I. -I$(ROOT)/src \
+		scheduler_test.c $(ROOT)/src/solar_os_scheduler.c -o $@
+
+script_lifecycle_test: script_lifecycle_test.c $(ROOT)/src/services/solar_os_script_lifecycle.c $(ROOT)/src/services/solar_os_script_lifecycle.h freertos/FreeRTOS.h freertos/task.h
+	$(CC) $(CFLAGS) -I. -I$(ROOT)/src/services \
+		script_lifecycle_test.c $(ROOT)/src/services/solar_os_script_lifecycle.c -o $@
 
 app_file_types_test: app_file_types_test.c $(ROOT)/src/apps/solar_os_app_file_types.c $(ROOT)/src/apps/solar_os_app_file_types.h
 	$(CC) $(CFLAGS) -I$(ROOT)/src/apps \
@@ -56,12 +83,16 @@ storage_mounts_test: storage_mounts_test.c $(ROOT)/src/services/solar_os_storage
 		storage_mounts_test.c $(ROOT)/src/services/solar_os_storage.c \
 		-Wl,--gc-sections -o $@
 
+json_scan_test: json_scan_test.c $(ROOT)/src/services/solar_os_json_scan.c $(ROOT)/src/services/solar_os_json_scan.h esp_err.h
+	$(CC) $(CFLAGS) -I. -I$(ROOT)/src/services \
+		json_scan_test.c $(ROOT)/src/services/solar_os_json_scan.c -o $@
+
 keys_test: keys_test.c $(ROOT)/src/services/solar_os_keys.c $(ROOT)/src/services/solar_os_keys.h
 	$(CC) $(CFLAGS) -I$(ROOT)/src/services \
 		keys_test.c $(ROOT)/src/services/solar_os_keys.c -o $@
 
-input_test: input_test.c $(ROOT)/src/services/solar_os_input.c $(ROOT)/src/services/solar_os_input.h $(ROOT)/src/services/solar_os_keyboard_layout.c $(ROOT)/src/services/solar_os_keyboard_layout.h esp_timer.h nvs.h freertos/FreeRTOS.h
-	$(CC) $(CFLAGS) -include compat.h -I. -I$(ROOT)/src/services \
+input_test: input_test.c $(ROOT)/src/services/solar_os_input.c $(ROOT)/src/services/solar_os_input.h $(ROOT)/src/services/solar_os_keyboard_layout.c $(ROOT)/src/services/solar_os_keyboard_layout.h $(ROOT)/src/services/solar_os_memory.h esp_timer.h nvs.h freertos/FreeRTOS.h
+	$(CC) $(CFLAGS) -include compat.h -I. -I$(ROOT)/src -I$(ROOT)/src/services \
 		input_test.c $(ROOT)/src/services/solar_os_input.c \
 		$(ROOT)/src/services/solar_os_keyboard_layout.c -o $@
 
@@ -74,6 +105,8 @@ board_caps_test: board_caps_test.c $(ROOT)/src/services/solar_os_board_caps.c $(
 		-DSOLAR_OS_BOARD_HAS_BATTERY=1 -DSOLAR_OS_BOARD_HAS_AUDIO=1 \
 		-DSOLAR_OS_BOARD_HAS_AUDIO_INPUT=1 -DSOLAR_OS_BOARD_HAS_WIFI=1 \
 		-DSOLAR_OS_BOARD_HAS_BLE=1 -DSOLAR_OS_BOARD_HAS_GPIO=1 \
+		-DSOLAR_OS_BOARD_HAS_POINTER=1 \
+		-DSOLAR_OS_BOARD_HAS_STREAMING_DISPLAY=1 \
 		-DSOLAR_OS_BOARD_HAS_ADC=1 -DSOLAR_OS_BOARD_HAS_PWM=1 \
 		-DSOLAR_OS_BOARD_HAS_EXPANSION_GPIO=1 \
 		-DSOLAR_OS_BOARD_HAS_EXPANSION_I2C=1 \
@@ -90,9 +123,17 @@ hid_keyboard_report_test: hid_keyboard_report_test.c $(ROOT)/src/services/solar_
 	$(CC) $(CFLAGS) -I$(ROOT)/src/services \
 		hid_keyboard_report_test.c $(ROOT)/src/services/solar_os_hid_keyboard_report.c -o $@
 
+ble_keyboard_scan_policy_test: ble_keyboard_scan_policy_test.c $(ROOT)/src/services/solar_os_ble_keyboard_scan_policy.c $(ROOT)/src/services/solar_os_ble_keyboard_scan_policy.h
+	$(CC) $(CFLAGS) -I$(ROOT)/src/services \
+		ble_keyboard_scan_policy_test.c $(ROOT)/src/services/solar_os_ble_keyboard_scan_policy.c -o $@
+
 ps2_keyboard_test: ps2_keyboard_test.c $(ROOT)/src/services/solar_os_ps2_keyboard.c $(ROOT)/src/services/solar_os_ps2_keyboard.h
 	$(CC) $(CFLAGS) -I$(ROOT)/src/services \
 		ps2_keyboard_test.c $(ROOT)/src/services/solar_os_ps2_keyboard.c -o $@
+
+ps2_mouse_test: ps2_mouse_test.c $(ROOT)/src/services/solar_os_ps2_mouse.c $(ROOT)/src/services/solar_os_ps2_mouse.h
+	$(CC) $(CFLAGS) -I$(ROOT)/src/services \
+		ps2_mouse_test.c $(ROOT)/src/services/solar_os_ps2_mouse.c -o $@
 
 cardkb_codec_test: cardkb_codec_test.c $(ROOT)/src/services/solar_os_cardkb_codec.c $(ROOT)/src/services/solar_os_cardkb_codec.h
 	$(CC) $(CFLAGS) -I$(ROOT)/src/services \
@@ -102,6 +143,13 @@ midi_codec_test: midi_codec_test.c $(ROOT)/src/services/solar_os_midi_codec.c $(
 	$(CC) $(CFLAGS) -I$(ROOT)/src/services \
 		midi_codec_test.c $(ROOT)/src/services/solar_os_midi_codec.c -o $@
 
+midi_service_test: midi_service_test.c $(ROOT)/src/services/solar_os_midi.c $(ROOT)/src/services/solar_os_midi.h $(ROOT)/src/services/solar_os_midi_codec.c $(ROOT)/src/services/solar_os_stream.c $(ROOT)/src/services/solar_os_stream.h esp_err.h freertos/FreeRTOS.h freertos/semphr.h freertos/portmacro.h
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -include compat.h -I. -I$(ROOT)/include \
+		-I$(ROOT)/src/services \
+		midi_service_test.c $(ROOT)/src/services/solar_os_midi.c \
+		$(ROOT)/src/services/solar_os_midi_codec.c \
+		$(ROOT)/src/services/solar_os_stream.c -o $@
+
 parameters_test: parameters_test.c $(ROOT)/src/services/solar_os_parameters.c $(ROOT)/src/services/solar_os_parameters.h esp_attr.h esp_err.h freertos/FreeRTOS.h freertos/semphr.h
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -include compat.h -I. -I$(ROOT)/src/services \
 		parameters_test.c $(ROOT)/src/services/solar_os_parameters.c -lm -o $@
@@ -110,6 +158,11 @@ controls_test: controls_test.c $(ROOT)/src/services/solar_os_controls.c $(ROOT)/
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -include compat.h -I. -I$(ROOT)/src/services \
 		controls_test.c $(ROOT)/src/services/solar_os_controls.c -lm -o $@
 
+osc_test: osc_test.c $(ROOT)/src/services/solar_os_osc.c $(ROOT)/src/services/solar_os_osc.h $(ROOT)/src/services/solar_os_parameters.c $(ROOT)/src/services/solar_os_parameters.h esp_attr.h esp_err.h freertos/FreeRTOS.h freertos/semphr.h
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -include compat.h -I. -I$(ROOT)/src/services \
+		osc_test.c $(ROOT)/src/services/solar_os_osc.c \
+		$(ROOT)/src/services/solar_os_parameters.c -lm -o $@
+
 dsp_test: dsp_test.c $(ROOT)/src/services/solar_os_dsp.c $(ROOT)/src/services/solar_os_dsp.h esp_err.h
 	$(CC) $(CFLAGS) -DSOLAR_OS_DSP_HOST_TEST -I. -I$(ROOT)/src/services \
 		dsp_test.c $(ROOT)/src/services/solar_os_dsp.c -lm -o $@
@@ -117,6 +170,10 @@ dsp_test: dsp_test.c $(ROOT)/src/services/solar_os_dsp.c $(ROOT)/src/services/so
 stream_test: stream_test.c $(ROOT)/src/services/solar_os_stream.c $(ROOT)/src/services/solar_os_stream.h esp_err.h freertos/FreeRTOS.h freertos/semphr.h freertos/portmacro.h
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -include compat.h -I. -I$(ROOT)/src/services \
 		stream_test.c $(ROOT)/src/services/solar_os_stream.c -o $@
+
+resources_test: resources_test.c $(ROOT)/src/services/solar_os_resources.c $(ROOT)/src/services/solar_os_resources.h esp_attr.h esp_err.h freertos/FreeRTOS.h freertos/semphr.h
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -include compat.h -I. -I$(ROOT)/src/services \
+		resources_test.c $(ROOT)/src/services/solar_os_resources.c -o $@
 
 audio_codec_test: audio_codec_test.c $(ROOT)/src/services/solar_os_audio_codec.c $(ROOT)/src/services/solar_os_audio_codec.h $(ROOT)/src/services/solar_os_audio_pcm.c $(ROOT)/src/services/solar_os_audio_pcm.h esp_err.h
 	$(CC) $(CFLAGS) -DSOLAR_OS_AUDIO_CODEC_HOST_TEST -I. -I$(ROOT)/src/services -I$(ROOT)/components/minimp3/include \
@@ -127,6 +184,10 @@ audio_codec_test: audio_codec_test.c $(ROOT)/src/services/solar_os_audio_codec.c
 webradio_catalog_test: webradio_catalog_test.c $(ROOT)/src/services/solar_os_webradio_catalog.c $(ROOT)/src/services/solar_os_webradio_catalog.h esp_attr.h esp_check.h esp_err.h nvs.h freertos/FreeRTOS.h freertos/portmacro.h
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -include compat.h -I. -I$(ROOT)/src -I$(ROOT)/src/services \
 		webradio_catalog_test.c $(ROOT)/src/services/solar_os_webradio_catalog.c -o $@
+
+gif_decode_stack_test: gif_decode_stack_test.c deep_animation.gif.b64 esp_heap_caps.h esp_err.h $(ROOT)/components/stb_image/stb_image_port.c $(ROOT)/components/stb_image/include/solar_os_stb_image.h $(ROOT)/components/stb_image/include/stb_image.h
+	$(CC) $(CFLAGS) -pthread -I. -I$(ROOT)/components/stb_image/include \
+		gif_decode_stack_test.c $(ROOT)/components/stb_image/stb_image_port.c -o $@
 
 nvs_backup_test: nvs_backup_test.c $(ROOT)/src/services/solar_os_nvs_backup.c $(ROOT)/src/services/solar_os_nvs_backup.h esp_partition.h nvs_flash.h esp_err.h freertos/FreeRTOS.h
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -include compat.h -I. -I$(ROOT)/src/services \
@@ -147,6 +208,18 @@ terminal_geometry_test: terminal_geometry_test.c $(ROOT)/src/services/solar_os_t
 	$(CC) $(CFLAGS) -I$(ROOT)/src/services terminal_geometry_test.c \
 		$(ROOT)/src/services/solar_os_terminal_geometry.c -o $@
 
+app_exit_result_test: app_exit_result_test.c $(ROOT)/src/solar_os.c $(ROOT)/src/solar_os.h $(ROOT)/src/shell/solar_os_shell_io.c $(ROOT)/src/shell/solar_os_shell_io.h
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -ffunction-sections -fdata-sections \
+		-include compat.h -I. -I$(ROOT)/src -I$(ROOT)/src/services \
+		-I$(ROOT)/src/shell \
+		-I$(ROOT)/components/u8g2/src/clib app_exit_result_test.c \
+		$(ROOT)/src/solar_os.c $(ROOT)/src/shell/solar_os_shell_io.c \
+		-Wl,--gc-sections -o $@
+
+terminal_preferences_test: terminal_preferences_test.c $(ROOT)/src/services/solar_os_terminal_preferences.c $(ROOT)/src/services/solar_os_terminal_preferences.h
+	$(CC) $(CFLAGS) -I. -I$(ROOT)/src -I$(ROOT)/src/services \
+		terminal_preferences_test.c $(ROOT)/src/services/solar_os_terminal_preferences.c -o $@
+
 tui_widgets_test: tui_widgets_test.c $(ROOT)/src/services/solar_os_tui_widgets.c $(ROOT)/src/services/solar_os_tui_widgets.h
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -ffunction-sections -fdata-sections -I. \
 		-I$(ROOT)/src -I$(ROOT)/src/services -I$(ROOT)/src/shell \
@@ -158,34 +231,81 @@ wireguard_crypto_test: wireguard_crypto_test.c $(ROOT)/components/wireguard_lwip
 		wireguard_crypto_test.c $(ROOT)/components/wireguard_lwip/src/crypto.c \
 		$(ROOT)/components/wireguard_lwip/src/crypto/refc/x25519.c -o $@
 
+meshcore_channel_key_test: meshcore_channel_key_test.cpp \
+		$(ROOT)/src/services/solar_os_meshcore_channel_key.cpp \
+		$(ROOT)/src/services/solar_os_meshcore_channel_key.h \
+		$(ROOT)/src/vendor/meshcore/crypto/SHA256.cpp \
+		$(ROOT)/src/vendor/meshcore/crypto/SHA256.h \
+		$(ROOT)/src/vendor/meshcore/crypto/Hash.cpp \
+		$(ROOT)/src/vendor/meshcore/crypto/Hash.h \
+		$(ROOT)/src/vendor/meshcore/crypto/Crypto.cpp
+	$(CXX) $(CXXFLAGS) -std=c++17 -Wall -Wextra -Werror \
+		-I$(ROOT)/src/services -I$(ROOT)/src/vendor/meshcore/crypto \
+		meshcore_channel_key_test.cpp \
+		$(ROOT)/src/services/solar_os_meshcore_channel_key.cpp \
+		$(ROOT)/src/vendor/meshcore/crypto/SHA256.cpp \
+		$(ROOT)/src/vendor/meshcore/crypto/Hash.cpp \
+		$(ROOT)/src/vendor/meshcore/crypto/Crypto.cpp -o $@
+
+meshcore_stream_codec_test: meshcore_stream_codec_test.c \
+		$(ROOT)/src/services/solar_os_meshcore_stream_codec.c \
+		$(ROOT)/src/services/solar_os_meshcore_stream_codec.h
+	$(CC) $(CFLAGS) -I. -I$(ROOT)/src/services \
+		meshcore_stream_codec_test.c \
+		$(ROOT)/src/services/solar_os_meshcore_stream_codec.c -o $@
+
+time_timezone_test: time_timezone_test.c \
+		$(ROOT)/src/services/solar_os_timezone.c \
+		$(ROOT)/src/services/solar_os_timezone.h
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -I$(ROOT)/src/services \
+		time_timezone_test.c $(ROOT)/src/services/solar_os_timezone.c -o $@
+
 test: $(TARGETS)
 	./writer_buffer_test
 	./writer_files_test
+	./sketch_canvas_test
+	./text_search_test
 	./doc_layout_test
 	./shell_parse_test
 	./shell_launch_test
 	./shell_line_test
+	./shell_completion_test
+	./shell_diag_test
+	./scheduler_test
+	./script_lifecycle_test
 	./app_file_types_test
 	./gameboy_support_test
 	./storage_mounts_test
+	./json_scan_test
 	./keys_test
 	./input_test
 	./board_caps_test
 	./hid_keyboard_report_test
+	./ble_keyboard_scan_policy_test
 	./ps2_keyboard_test
+	./ps2_mouse_test
 	./cardkb_codec_test
 	./midi_codec_test
+	./midi_service_test
 	./parameters_test
 	./controls_test
+	./osc_test
 	./dsp_test
 	./stream_test
+	./resources_test
 	./audio_codec_test
 	./webradio_catalog_test
+	./gif_decode_stack_test
 	./nvs_backup_test
 	./agent_reference_test
 	./terminal_geometry_test
+	./app_exit_result_test
+	./terminal_preferences_test
 	./tui_widgets_test
 	./wireguard_crypto_test
+	./meshcore_channel_key_test
+	./meshcore_stream_codec_test
+	./time_timezone_test
 
 clean:
 	$(RM) $(TARGETS)
