@@ -96,9 +96,9 @@ class BoardManifestTest(unittest.TestCase):
         self.assertIn("#define SOLAR_OS_BOARD_BUTTONS", header)
         self.assertIn(".miso_pin = GPIO_NUM_NC", header)
 
-    def test_waveshare_battery_binding_matches_runtime_driver(self) -> None:
+    def test_solar_term_battery_binding_matches_runtime_driver(self) -> None:
         board = load_board_manifest(
-            self.manifest_dir / "waveshare_esp32_s3_rlcd_4_2.toml",
+            self.manifest_dir / "solar_term.toml",
             self.manifest_dir,
         )
         header = generate_header(board, self.drivers)
@@ -113,6 +113,115 @@ class BoardManifestTest(unittest.TestCase):
             '.kind = SOLAR_OS_EXPANSION_BINDING_ADC, .role = "adc",',
             runtime_driver,
         )
+
+    def test_cl32_manifest_keeps_m2_memory_and_system_signals_fixed(self) -> None:
+        board = load_board_manifest(
+            self.manifest_dir / "cl_32.toml",
+            self.manifest_dir,
+        )
+        header = generate_header(board, self.drivers)
+        self.assertNotIn("SOLAR_OS_BOARD_HEADLESS_PREFER_CDC", header)
+        self.assertIn('#define SOLAR_OS_BOARD_DISPLAY_CONTROLLER "ST7305"', header)
+        self.assertIn("#define SOLAR_OS_BOARD_DISPLAY_WIDTH 384", header)
+        self.assertIn("#define SOLAR_OS_BOARD_DISPLAY_HEIGHT 168", header)
+        self.assertIn("display", board["build"]["capabilities"])
+        self.assertIn("battery", board["build"]["capabilities"])
+        self.assertIn("streaming_display", board["build"]["capabilities"])
+        pins = {pin["gpio"]: pin for pin in board["pins"]}
+        self.assertEqual(
+            {gpio for gpio, pin in pins.items() if pin["policy"] == "free"},
+            {4, 8, 15, 16, 17, 18, 21, 38, 39, 40, 41, 42, 47, 48},
+        )
+        for gpio in (1, 2, 3, 19, 20, 35, 36, 37, 46):
+            self.assertEqual(pins[gpio]["policy"], "fixed")
+
+        buses = {bus["name"]: bus for bus in board["buses"]}
+        self.assertEqual(
+            (buses["spi0"]["sclk"], buses["spi0"]["mosi"], buses["spi0"]["miso"]),
+            (9, 10, 11),
+        )
+        self.assertEqual(buses["spi0"]["cs"], [6, 7])
+        self.assertEqual(
+            {device["name"] for device in board["devices"]},
+            {"display0", "rtc0", "storage0", "audio0", "core0"},
+        )
+        display = next(
+            device for device in board["devices"] if device["name"] == "display0"
+        )
+        self.assertEqual(display["driver"], "st7305")
+        self.assertEqual(
+            display["bindings"],
+            {
+                "spi": "spi0",
+                "cs": 6,
+                "dc": 13,
+                "reset": 12,
+                "panel": 1,
+                "rotation": 3,
+            },
+        )
+        audio = next(
+            device for device in board["devices"] if device["name"] == "audio0"
+        )
+        self.assertEqual(audio["driver"], "audio-pwm")
+        self.assertEqual(audio["bindings"], {"pwm": 5})
+        self.assertIn("expansion_audio_pwm", required_packages(board, self.drivers))
+        self.assertIn("driver_display_st7305", required_packages(board, self.drivers))
+        self.assertIn(
+            '.kind = SOLAR_OS_EXPANSION_BINDING_PWM, .role = "pwm", .value = 5',
+            header,
+        )
+        self.assertIn(
+            '.driver = "st7305", .name = "display0"',
+            header,
+        )
+        self.assertIn(
+            '.kind = SOLAR_OS_EXPANSION_BINDING_PARAMETER, .role = "panel", .value = 1',
+            header,
+        )
+        self.assertIn(
+            '.kind = SOLAR_OS_EXPANSION_BINDING_PARAMETER, .role = "rotation", .value = 3',
+            header,
+        )
+
+        connectors = {
+            (pin["connector"], pin["position"]): pin
+            for pin in board["connectors"]
+        }
+        self.assertEqual(connectors[("EX1", 52)]["gpio"], 4)
+        self.assertEqual(connectors[("EX1", 58)]["gpio"], 1)
+        self.assertEqual(connectors[("EX1", 60)]["gpio"], 2)
+        self.assertEqual(connectors[("EX1", 62)]["gpio"], 3)
+        self.assertEqual(connectors[("EX1", 53)]["gpio"], 35)
+
+    def test_solar_term_rtc_interrupt_binding_is_fixed_but_optional(self) -> None:
+        board = load_board_manifest(
+            self.manifest_dir / "solar_term.toml",
+            self.manifest_dir,
+        )
+        rtc = next(device for device in board["devices"] if device["name"] == "rtc0")
+        self.assertEqual(rtc["bindings"]["irq"], 15)
+        rtc_pin = next(pin for pin in board["pins"] if pin["gpio"] == 15)
+        self.assertEqual(rtc_pin["policy"], "fixed")
+        self.assertEqual(rtc_pin["role"], "RTC interrupt")
+
+        header = generate_header(board, self.drivers)
+        self.assertIn(
+            '.kind = SOLAR_OS_EXPANSION_BINDING_GPIO, .role = "irq", .value = 15',
+            header,
+        )
+        rtc_adapter = (
+            ROOT / "src" / "services" / "solar_os_pcf85063.c"
+        ).read_text(encoding="utf-8")
+        self.assertIn("solar_os_rtc_register_provider", rtc_adapter)
+        self.assertNotIn("solar_os_time_register_provider", rtc_adapter)
+
+        without_irq = deepcopy(board)
+        rtc_without_irq = next(
+            device for device in without_irq["devices"] if device["name"] == "rtc0"
+        )
+        del rtc_without_irq["bindings"]["irq"]
+        validate_board(without_irq, self.drivers)
 
     def test_pin_conflict_is_rejected(self) -> None:
         board = load_board_manifest(

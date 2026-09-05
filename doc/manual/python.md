@@ -243,11 +243,41 @@ if solaros.wifi.status()["has_ip"]:
     print(solaros.time.ntp_sync())
 ```
 
+## `solaros.rtc`
+
+Direct access to optional RTC alarm and countdown hardware:
+
+- `status()`: return availability, provider, capabilities, interrupt GPIO and active level, and current slot owners.
+- `set_alarm(hour, minute[, second[, day[, weekday]]])`; `clear_alarm()`.
+- `set_timer(seconds[, repeat])`; `clear_timer()`.
+- `pending()`; `ack(mask)`, using `INTERRUPT_ALARM` and `INTERRUPT_TIMER`.
+
+Direct slots are leased to the Python runtime and released when it exits. A
+busy error means the scheduler or another client owns that hardware slot.
+
+## `solaros.schedule`
+
+Named schedules remain available after the creating script exits:
+
+- `list()` returns entry dictionaries.
+- `add_in(name, seconds[, action[, value[, persistent]]])`.
+- `add_every(name, seconds[, action[, value]])`.
+- `add_at(name, year, month, day, hour, minute, second[, action[, value]])`.
+- `add_daily(name, hour, minute, second[, action[, value]])`.
+- `add_weekly(name, weekday_mask, hour, minute, second[, action[, value]])`.
+- `enable(name, enabled)`, `remove(name)`, `run(name)`, and `stop_alarm()`.
+
+The action is `"alarm"` or `"run"`; a run action requires an absolute shell
+script path. Combine `SUN` through `SAT` with bitwise OR for weekly schedules.
+
 ## `solaros.battery`
 
 Available when the firmware includes the battery service.
 
-- `status()`: return battery status with `voltage_mv`, `percent`, `percent_estimated`, `adc_calibrated`, and `external_power`.
+- `status()`: return battery status with `voltage_mv`, `percent`,
+  `percent_estimated`, `adc_calibrated`, `external_power`, `charging`, and
+  `charging_known`. When `charging_known` is false, `charging` is only a trend
+  estimate.
 
 Example:
 
@@ -275,7 +305,7 @@ print("{:.1f} C {:.1f}%".format(env["temperature_c"], env["humidity_percent"]))
 
 ## `solaros.wifi`
 
-Wi-Fi functions expose station, SoftAP, scan, and NAT controls.
+Wi-Fi functions expose station, SoftAP, scan, NAT, and L2 IPv4 repeater controls.
 
 - `status()`: return detailed Wi-Fi status.
 - `status_text()`: return the same compact status text used by the shell.
@@ -292,6 +322,8 @@ Wi-Fi functions expose station, SoftAP, scan, and NAT controls.
 - `ap_start([ssid[, password[, auth]]])`: start SoftAP, reusing saved AP config when no arguments are supplied.
 - `ap_stop()`: stop SoftAP.
 - `nat(enabled)`: persistently enable or disable APSTA NAT.
+- `repeater_start()`: connect the preferred remembered upstream when needed, repeat its saved SSID and password, and bridge upstream DHCP plus IPv4/ARP traffic without NAT.
+- `repeater_stop()`: stop L2 forwarding and the SoftAP while retaining the upstream station.
 
 Example:
 
@@ -455,7 +487,7 @@ finally:
 ## `solaros.gpio`
 
 GPIO functions expose only runtime-safe expansion pins. Use `solaros.gpio.pins()`
-to inspect the active board. On the Waveshare ESP32-S3-RLCD-4.2 this is GPIO1,
+to inspect the active board. On SolarTerm (the Waveshare ESP32-S3-RLCD-4.2) this is GPIO1,
 GPIO2, GPIO3, GPIO17, plus releasable GPIO43/GPIO44 while `uart0` is detached. On the ESP32-S3-DevKitC-1-N16R8 this is GPIO1,
 GPIO2, GPIO4, GPIO5, GPIO6, GPIO7, GPIO10, GPIO14, GPIO15, GPIO16, GPIO17,
 GPIO18, GPIO21, GPIO39, GPIO40, GPIO41, GPIO42, and GPIO47. On ODROID-GO this

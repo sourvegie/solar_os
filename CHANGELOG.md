@@ -2,6 +2,57 @@
 
 ## 4.x
 
+- **4.10.18** — 2026-09-04 — `help update` now reads catalog keyword metadata
+  in its published string form and accepts signed manuals that omit
+  package-gated topics from the active runtime index, fixing verification
+  failures on boards without the ADC D-pad service. Valid downloaded manuals
+  now remain available after an OS upgrade and are clearly marked as possibly
+  outdated until refreshed or reset.
+- **4.10.17** — 2026-09-04 — Shell path completion now understands quoted and
+  backslash-escaped input and quotes completed filenames that contain spaces.
+- **4.10.16** — 2026-09-04 — `ble forget` now clears the remembered
+  keyboard's cached GATT service database as well as its bond, forcing service
+  rediscovery when keyboard firmware changes move attribute handles.
+- **4.10.15** — 2026-09-04 — Added the CL-32 target with its 384x168 ST7305
+  reflective display, ATmega808-backed keyboard and battery monitor, PWM
+  buzzer audio, SDSPI storage, PCF85063 RTC, native USB CDC, and expansion
+  buses. Extended the ST7305 driver for the smaller panel geometry and board
+  rotation. Diagnostic tones now follow the selected default playback device,
+  including runtime-attached outputs. Edit gained `F2` Save, `F3` Find, and
+  `F10` Quit aliases while retaining its portable Ctrl and Esc controls. The
+  Waveshare ESP32-S3-RLCD-4.2 target is now named SolarTerm, with the
+  `solar_term` board and PlatformIO environment identifiers. Inactive optional
+  expansion-driver registries and the Telnet listener stack now use PSRAM,
+  restoring internal RAM without moving scheduler, session, transport, or
+  active hardware state out of internal memory.
+- **4.10.14** — 2026-09-03 — Added optional one-hop SolarOS Link repeating to
+  the packet-radio `radio-link` job. A headless device with one compatible
+  radio can retransmit text, binary, acknowledgement, broadcast, and virtual
+  stream frames while preserving the original Link identities. Relayed-frame
+  marking, randomized forwarding delay, duplicate suppression, and a bounded
+  queue prevent forwarding loops and reduce collisions. Job status reports
+  forwarded, suppressed, queued, dropped, and invalid-frame counters.
+- **4.10.13** — 2026-09-03 — Added an IPv4 layer-2 Wi-Fi repeater. The
+  `wifi repeater` command and matching Python/Lua APIs bridge DHCP and IPv4/ARP
+  traffic between an upstream station and downstream SoftAP without NAT, so
+  downstream clients remain on the upstream subnet. Status includes learned
+  clients and forwarding counters. The SoftAP automatically repeats the active
+  saved profile's SSID and password; stopping retains the upstream link.
+- **4.10.12** — 2026-09-02 — Added generic RTC alarm and timer support,
+  including PCF85063 hardware alarms, plus a portable persistent scheduler with
+  shell and Python/Lua APIs. Added NVS inventory and selective erase commands.
+  Hardened downloadable help with signed metadata, verified cached pages, a
+  compact catalog, larger page limits, runtime package gating, and corrected
+  focused command pages and aliases.
+- **4.10.11** — 2026-09-02 — Standardized the built-in flavor set around the
+  board-first Applications, Background jobs, and Drivers model. Added the
+  dedicated VGA32 flavor and aligned default board mappings, package
+  resolution, documentation, and flash partition layouts.
+- **4.10.10** — 2026-09-01 — Kept Telnet sessions responsive with a scoped
+  low-latency Wi-Fi lease that restores the normal power-saving policy after
+  disconnect. Added the PCM1808 capture-only I2S expansion driver and matching
+  recording and Python/Lua support. Added interactive flavor configuration and
+  the SolarOS builder for selecting packages and producing board images.
 - **4.10.9** — 2026-08-31 — Added trusted MeshCore virtual serial ports. Two
   SolarOS devices can create matching peer-bound streams that carry reliable
   SolarOS Link framing inside end-to-end encrypted MeshCore direct packets, so
@@ -17,6 +68,11 @@
   `solaros.ftp` Python and Lua bindings. FTP copy and move operations show
   Files-style progress, and same-directory refreshes preserve both pane
   positions.
+- **4.10.7** — 2026-08-31 — Unified foreground application ownership and exit
+  handling across native applications, scripts, remote sessions, and port
+  shells, making terminal and display handoff deterministic. Game Boy now
+  composes a clean frame when its session resumes instead of exposing stale
+  display content.
 - **4.10.6** — 2026-08-30 — Added a shared raster-frame presenter for bounded
   animation: MONO1, INDEX2, and INDEX8 frame contracts now describe source and
   destination geometry, display targets publish their supported formats and
@@ -83,6 +139,10 @@
   pointers attached later at runtime. It saves interoperable grayscale PNG
   files transactionally and imports PNG, JPEG, and GIF images. App state,
   canvas, browser, and decode buffers are cold allocated and released on exit.
+- **4.10.0** — 2026-08-29 — Added Synth hold mode, which toggles notes on key
+  press for sustained chords without requiring keys to remain held. Improved
+  the board configurator handoff by printing exact build and upload commands
+  while preserving the selected `SOLAR_OS_BOARD` profile.
 - **4.9.2** — 2026-08-29 — Unified board-integrated hardware with the expansion
   lifecycle. Battery ADC, PCF85063 RTC, SHTC3 sensing, FT6336 touch, ST7305,
   ILI9341, ST7796, SSD1683, CVBS PAL, VGA32, SDMMC, ES8311/ES7210,
@@ -98,7 +158,7 @@
   ESP32-DAC playback. `aplay` and `arecord` can now run from display, UART, USB
   CDC, Telnet, and other port shells. PlatformIO build locking now degrades to
   an explicit warning-only no-op on Windows, where POSIX `flock` is unavailable.
-  Physical acceptance passed on Waveshare ESP32-S3-RLCD-4.2, Freenove FNK0104S,
+  Physical acceptance passed on SolarTerm (Waveshare ESP32-S3-RLCD-4.2), Freenove FNK0104S,
   Elecrow CrowPanel, ODROID-GO, and ESP32-S3 DevKitC-1; Freenove ESP32-WROVER
   v3.0 CVBS output and SDMMC storage also passed.
 - **4.9.1** — 2026-08-27 — Added mirrored `solaros.input` Python and Lua
@@ -469,7 +529,7 @@
   starts from the requested path, while manual references and remote SCP paths
   remain unchanged.
 - **4.6.0** — 2026-08-04 — Added an experimental original Game Boy (DMG)
-  emulator to the `retro` flavor for the Waveshare ESP32-S3-RLCD-4.2. It loads
+  emulator to the `retro` flavor for SolarTerm (Waveshare ESP32-S3-RLCD-4.2). It loads
   ROMs into PSRAM, persists cartridge RAM in adjacent `.sav` files, supports
   held and simultaneous controls from the BLE HID key state, and renders the
   MiniGB APU through the shared synth and audio services. Emulation, audio, and

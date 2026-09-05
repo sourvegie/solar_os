@@ -18,10 +18,11 @@ operation.
 Local hardware input uses structured press, release, and repeat events. The
 input service tracks held keys by source and stable physical identity, while
 legacy shell and text applications continue to receive translated characters.
-BLE, PS/2, and CardKB keyboards, fixed board buttons, `gpio-keys`, and ADC
-D-pads share one repeat policy. Configure it with `setterm keyrate`; the
-setting applies even on a build without BLE. Analog joysticks are different:
-they publish normalized axes and never synthesize key events.
+BLE, PS/2, CardKB, and the integrated CL-32 keyboard, fixed board buttons,
+`gpio-keys`, and ADC D-pads share one repeat policy. Configure it with
+`setterm keyrate`; the setting applies even on a build without BLE. Analog
+joysticks are different: they publish normalized axes and never synthesize key
+events.
 
 Keyboard transports can additionally supply a canonical USB HID usage and
 modifier mask. This keeps physical controls independent of the selected text
@@ -32,6 +33,12 @@ attached. Each accepted key press, release, or repeat increments `key`; it is
 not a count of currently held keys. Character-only devices such as CardKB emit
 one press and one release per character, so one tap normally adds two events.
 Their last event has `physical=0` and `usage=0`; `key=10` is newline/Enter.
+
+CL-32 `core0` polls the integrated AVR event FIFO every 10 ms and registers
+`keyboard0`. It preserves press and release transitions. Shift and Fn cycle
+through one-shot, locked, and off states. File is left Alt, Menu is left Ctrl,
+OK is Enter, Cancel is Escape, and Fn with keypad 1 through 0 produces F1
+through F10.
 
 ## PS/2 keyboard
 
@@ -181,11 +188,13 @@ do not forget the remembered keyboard or its bond. On a BLE-disabled boot, the
 unused Bluetooth controller and host memory is returned to the internal heap
 before normal service initialization.
 `ble forget` erases the remembered keyboard from SolarOS NVS and removes its BLE
-bond. On boards with a system KEY, a long press performs that forget operation
-and then starts a new pairing scan. Pairing has no user cancellation path. The
-KEY short-press power action remains separately configurable with
-`setterm powerkey sleep|suspend`. Suspend is the default; another short press
-resumes the display and restores the prior power profile.
+bond and cached GATT service database. This forces service rediscovery when the
+same keyboard address is paired again, including after keyboard firmware changes
+move its GATT handles. On boards with a system KEY, a long press performs that
+forget operation and then starts a new pairing scan. Pairing has no user
+cancellation path. The KEY short-press power action remains separately
+configurable with `setterm powerkey sleep|suspend`. Suspend is the default;
+another short press resumes the display and restores the prior power profile.
 
 ## Clipboard
 

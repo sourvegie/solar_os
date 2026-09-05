@@ -425,6 +425,10 @@ Controls:
 ## clock
 
 Full-screen graphical seven-segment clock, alarm countdown, and stopwatch.
+The countdown is serviced in the background, so it continues when the Clock
+session is suspended. It works without RTC hardware while SolarOS remains
+powered. With a wired RTC interrupt, the RTC alarm or countdown is also armed
+and explicit light sleep can wake for it.
 
 Usage:
 
@@ -438,6 +442,7 @@ Controls:
 
 - In stopwatch mode, `Space` starts/stops.
 - In stopwatch mode, any other ordinary key resets to zero.
+- Exiting a countdown removes that transient alarm and stops it if ringing.
 - `Esc` or app-exit key exits.
 
 ## com
@@ -603,6 +608,7 @@ Controls:
 The maintenance forms `help status`, `help update`, and `help reset` remain
 shell operations. SD-capable builds show terminal-width-aware progress while
 downloading and extracting one exact-version signed manual archive.
+Use `help command.status` to open the shell `status` command page.
 
 ## edit
 
@@ -623,10 +629,10 @@ Controls:
 - `Ctrl+Left`/`Ctrl+Right` move by words.
 - `Shift+Arrows` extend selection.
 - `Ctrl+A`, `Ctrl+C`, `Ctrl+X`, `Ctrl+V` select all, copy, cut, and paste.
-- `Ctrl+F` opens Find and `F3` jumps to the next case-insensitive match,
-  wrapping at the end of the file.
-- `Ctrl+S` saves in place. `Ctrl+Q`, `Esc`, or the app-exit key exits without
-  saving pending changes.
+- `Ctrl+F` or `F3` opens Find. Matches are case-insensitive and wrap at the end
+  of the file.
+- `Ctrl+S` or `F2` saves in place. `Ctrl+Q`, `Esc`, `F10`, or the app-exit key
+  exits without saving pending changes.
 - `Ctrl++` and `Ctrl+-` adjust editor text size for the active session.
 
 ## hexedit

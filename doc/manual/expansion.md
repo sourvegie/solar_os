@@ -20,9 +20,12 @@ an `ft6336` attachment; Waveshare `rtc0` and `environment0` use `pcf85063` and
 `shtc3`; and the supported battery boards expose `battery0` through
 `battery-adc`. TTGO VGA32 `keyboard0` is a `ps2-keyboard` attachment. Built-in
 audio also appears as `audio0`: Waveshare uses `es8311-es7210`, Freenove uses
-`es8311-duplex`, and classic ESP32 audio boards use `esp32-dac`. Generic input,
-time, sensor, battery, and audio services consume the same runtime providers
-whether the attachment came from the board profile or the shell.
+`es8311-duplex`, and classic ESP32 audio boards use `esp32-dac`. CL-32 declares
+its integrated AVR as fixed `core0`; its polled event FIFO supplies the
+`keyboard0` input source and its voltage and power-status registers supply
+`battery0`. Generic input, time, sensor, battery, and audio services consume the
+same runtime providers whether the attachment came from the board profile or
+the shell.
 
 Built-in displays follow the same rule and appear as fixed `display0`
 attachments: Waveshare uses `st7305`, Freenove uses `st7796`, ODROID-GO uses
@@ -116,6 +119,13 @@ humidity
 expansion detach environment0
 expansion detach rtc0
 ```
+
+The PCF85063 `irq=<gpio>` binding is optional. The Waveshare board profile
+reserves its routed RTC interrupt on GPIO15; external modules can omit `irq`
+when only clock and calendar access is required.
+The generic RTC service discovers alarm, countdown, and interrupt-status
+support from the attached chip adapter, so applications do not depend on the
+PCF85063 register interface.
 
 `battery-adc` takes an ADC pin and a divider ratio in thousandths. For a 2:1
 resistive divider, use `divider=2000`:

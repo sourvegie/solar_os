@@ -537,9 +537,15 @@ category = "Internal"
 hidden = true
 members = ["service_hid"]
 
+[groups.cl32_core]
+label = "CL-32 board controller"
+category = "Internal"
+hidden = true
+members = ["board_cl32_core"]
+
 [packages.core_runtime]
 label = "bootstrap.runtime"
-depends = ["service_streams"]
+depends = ["service_schedule", "service_streams"]
 sources = [
   "main.c",
   "solar_os.c",
@@ -654,6 +660,7 @@ sources = [
   "shell/solar_os_shell_line.c",
   "shell/solar_os_shell_setterm_tui.c",
   "shell/solar_os_shell_system.c",
+  "shell/solar_os_shell_schedule.c",
   "shell/solar_os_vt100.c",
   "services/solar_os_transfer.c",
   "services/solar_os_zmodem.c",
@@ -694,6 +701,7 @@ label = "service.wifi"
 sources = [
   "services/solar_os_lwip_route.c",
   "services/solar_os_wifi.c",
+  "services/solar_os_wifi_repeater.c",
   "shell/solar_os_shell_network.c",
   "shell/solar_os_shell_wifi_tui.c",
 ]
@@ -1048,6 +1056,7 @@ any_capabilities = [
 label = "service.link"
 sources = [
   "services/solar_os_link.c",
+  "services/solar_os_link_repeater.c",
   "services/solar_os_link_stream.c",
   "services/solar_os_link_messaging.c",
   "shell/solar_os_shell_link.c",
@@ -1175,6 +1184,19 @@ sources = [
 ]
 requires = ["esp_driver_i2c"]
 capabilities = ["expansion_i2c"]
+
+[packages.board_cl32_core]
+label = "board.cl32-core"
+targets = ["esp32s3"]
+expansion_drivers = ["solar_os_cl32_core_expansion_driver"]
+depends = ["service_battery", "service_expansion", "service_i2c"]
+sources = [
+  "services/solar_os_cl32_core.c",
+  "services/solar_os_cl32_core_driver.c",
+  "services/solar_os_cl32_keyboard.c",
+]
+requires = ["esp_driver_i2c"]
+capabilities = ["i2c"]
 
 [packages.expansion_analog_joystick]
 label = "expansion.analog-joystick"
@@ -1466,6 +1488,12 @@ sources = ["services/solar_os_battery.c"]
 
 [packages.service_rtc]
 label = "service.rtc"
+sources = ["services/solar_os_rtc.c"]
+
+[packages.service_schedule]
+label = "service.schedule"
+depends = ["service_rtc"]
+sources = ["services/solar_os_schedule.c"]
 
 [packages.service_sensors]
 label = "service.sensors"
@@ -1680,6 +1708,7 @@ capabilities = ["psram", "wifi"]
 
 [packages.app_clock]
 label = "app.clock"
+depends = ["service_schedule"]
 sources = ["apps/solar_os_clock.c"]
 capabilities = ["gfx"]
 
