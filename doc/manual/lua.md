@@ -502,8 +502,9 @@ local devices = solaros.buses.onewire_scan("onewire0")
 local reply = solaros.buses.onewire_xfer("onewire0", 9, "\xcc\x44")
 ```
 
-`solaros.expansion.drivers()` lists compiled drivers. `devices()` lists active
-devices with `name`, `driver`, `origin` (`board` or `runtime`), `ready`,
+`solaros.expansion.drivers()` lists compiled drivers with their categories.
+`devices()` lists active devices with `name`, `driver`, `origin` (`board` or
+`runtime`), `ready`,
 `autostart`, `detachable`, and normalized `bindings`. Each binding contains
 `kind`, `role`, `target`, `value`, and `aux`. `attach(driver, name, bindings)`
 and `detach(name)` mirror the shell lifecycle. Binding tables accept `spi`,
@@ -701,6 +702,8 @@ Functions:
 - `pixel(x, y)`, `line(x0, y0, x1, y1)`
 - `rect(x, y, width, height)`, `fill_rect(x, y, width, height)`
 - `circle(x, y, radius)`, `fill_circle(x, y, radius)`
+- `icon(x, y, name, size)` with a lowercase, hyphenated Open Iconic name such
+  as `tablet`; size is `8`, `16`, `32`, `48`, or `64`
 - `bitmap(x, y, width, height, data)`, `sprite(...)` alias
 - `text(x, baseline_y, text)`
 - `refresh()`, `present()`

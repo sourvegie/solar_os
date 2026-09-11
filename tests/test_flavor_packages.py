@@ -26,6 +26,18 @@ class FlavorPackagesTest(unittest.TestCase):
             self.catalog,
         )
 
+    def test_public_flavor_name_can_override_package_configuration_name(self):
+        self.assertEqual(
+            generate_flavor_config.public_flavor_name("full", "beta"),
+            "beta",
+        )
+        self.assertEqual(
+            generate_flavor_config.public_flavor_name("full", ""),
+            "full",
+        )
+        with self.assertRaisesRegex(ValueError, "invalid flavor name"):
+            generate_flavor_config.public_flavor_name("full", "beta flavor")
+
     def test_games_are_only_in_full(self):
         built_in_flavors = ("core", "full", "netrunner", "rover", "writerdeck")
         for flavor in built_in_flavors:
@@ -70,6 +82,22 @@ class FlavorPackagesTest(unittest.TestCase):
         self.assertTrue(pruned_packages["app_sketch"])
         self.assertFalse(pruned_packages["app_view"])
 
+    def test_launcher_is_available_on_graphics_builds(self):
+        for flavor in ("core", "full", "netrunner", "rover", "vga32", "writerdeck"):
+            groups, packages = self.resolve(flavor)[2:]
+            self.assertTrue(groups["launcher"], flavor)
+            self.assertTrue(packages["app_launcher"], flavor)
+
+        _, _, groups, packages = self.resolve("core")
+        _, graphics = generate_flavor_config.apply_board_capability_pruning(
+            self.catalog, groups, packages, {"gfx"}
+        )
+        _, headless = generate_flavor_config.apply_board_capability_pruning(
+            self.catalog, groups, packages, set()
+        )
+        self.assertTrue(graphics["app_launcher"])
+        self.assertFalse(headless["app_launcher"])
+
     def test_board_required_package_enables_dependencies(self):
         _, _, _, packages = self.resolve("core")
         enabled = generate_flavor_config.enable_required_packages(
@@ -108,6 +136,45 @@ class FlavorPackagesTest(unittest.TestCase):
             self.assertTrue(pruned["driver_shtc3"], target)
             self.assertTrue(pruned["driver_battery_adc"], target)
             self.assertTrue(pruned["expansion_sdmmc"], target)
+
+    def test_full_exposes_reusable_t_lora_expansion_drivers(self):
+        _, _, groups, packages = self.resolve("full")
+        reusable = {
+            "tca8418": "tca8418",
+            "sx1262": "sx1262",
+            "rotary_encoder": "rotary_encoder",
+            "bq27220": "bq27220",
+        }
+        for group, package in reusable.items():
+            with self.subTest(group=group):
+                self.assertFalse(self.catalog.group_defs[group].hidden)
+                self.assertEqual(
+                    self.catalog.group_defs[group].category,
+                    "Expansion hardware",
+                )
+                self.assertTrue(groups[group])
+                self.assertTrue(packages[package])
+
+        self.assertTrue(self.catalog.group_defs["tlora_pager_core"].hidden)
+        self.assertFalse(groups["tlora_pager_core"])
+        self.assertFalse(packages["tlora_pager_core"])
+
+        s3 = generate_flavor_config.apply_target_pruning(
+            self.catalog,
+            packages,
+            "esp32s3",
+        )
+        drivers = generate_flavor_config.collect_expansion_drivers(
+            self.catalog,
+            s3,
+        )
+        for symbol in (
+            "solar_os_tca8418_expansion_driver",
+            "solar_os_sx1262_expansion_driver",
+            "solar_os_rotary_encoder_expansion_driver",
+            "solar_os_bq27220_expansion_driver",
+        ):
+            self.assertIn(symbol, drivers)
 
     def test_target_pruning_removes_incompatible_driver_and_dependents(self):
         _, _, _, packages = self.resolve("full")

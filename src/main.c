@@ -101,6 +101,7 @@
 #define RUNTIME_CADENCE_LOG_INTERVAL_MS 60000U
 #define SESSION_OVERLAY_TITLE_MAX 48
 #define SESSION_OVERLAY_MS 900
+#define SLEEP_REASON_MAX 32
 
 static const char *TAG = "solar_os";
 
@@ -131,6 +132,8 @@ static bool key_interrupt_ready;
 static bool key_pressed;
 static bool key_long_press_fired;
 static bool key_ignore_until_released;
+static bool deferred_sleep_pending;
+static char deferred_sleep_reason[SLEEP_REASON_MAX];
 static uint32_t key_pressed_ms;
 static uint32_t last_app_tick_ms;
 static uint32_t last_status_update_ms;
@@ -143,6 +146,7 @@ static uint8_t session_switch_nav_held;
 static solar_os_runtime_loop_stats_t runtime_loop_stats;
 
 static void process_app_requests(void);
+static void maybe_enter_deferred_sleep(void);
 static void maybe_enter_idle_sleep(void);
 static void update_status(void);
 
@@ -758,9 +762,26 @@ static void enter_light_sleep(const char *reason)
         const esp_err_t ble_sleep_err =
             solar_os_ble_keyboard_prepare_sleep(BLE_SLEEP_DISCONNECT_TIMEOUT_MS);
         if (ble_sleep_err != ESP_OK) {
-            SOLAR_OS_LOGW(TAG,
-                          "BLE keyboard sleep prepare failed: %s",
-                          esp_err_to_name(ble_sleep_err));
+            if (ble_sleep_err == ESP_ERR_NOT_FINISHED) {
+                deferred_sleep_pending = true;
+                strlcpy(deferred_sleep_reason,
+                        reason != NULL ? reason : "deferred sleep",
+                        sizeof(deferred_sleep_reason));
+                SOLAR_OS_LOGI(TAG,
+                              "BLE keyboard reconnect is stopping; sleep deferred");
+            } else {
+                SOLAR_OS_LOGW(TAG,
+                              "BLE keyboard sleep prepare failed, cancelling sleep: %s",
+                              esp_err_to_name(ble_sleep_err));
+            }
+            (void)esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+            if (rtc_wake_gpio != SOLAR_OS_RTC_INTERRUPT_GPIO_NONE) {
+                (void)rtc_gpio_deinit((gpio_num_t)rtc_wake_gpio);
+            }
+            (void)esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_AUTO);
+            key_restore_gpio_after_rtc();
+            (void)solar_os_power_end_explicit_sleep();
+            return;
         }
     }
 #endif
@@ -868,6 +889,27 @@ static void enter_light_sleep(const char *reason)
     resume_display_after_sleep(now_ms);
 }
 
+static void maybe_enter_deferred_sleep(void)
+{
+    if (!deferred_sleep_pending) {
+        return;
+    }
+
+#if SOLAR_OS_PACKAGE_SERVICE_BLE
+    if (board_has(SOLAR_OS_BOARD_CAP_BLE) &&
+        !solar_os_ble_keyboard_sleep_prepare_ready()) {
+        return;
+    }
+#endif
+
+    char reason[SLEEP_REASON_MAX];
+    strlcpy(reason, deferred_sleep_reason, sizeof(reason));
+    deferred_sleep_pending = false;
+    deferred_sleep_reason[0] = '\0';
+    SOLAR_OS_LOGI(TAG, "%s: deferred sleep is ready", reason);
+    enter_light_sleep(reason);
+}
+
 static void handle_key_short_press(void)
 {
     solar_os_power_status_t power_status;
@@ -971,7 +1013,7 @@ static void poll_key_button(void)
         update_status();
         draw_terminal_if_needed();
         if (forget_err == ESP_OK && pairing_err == ESP_OK) {
-            SOLAR_OS_LOGI(TAG, "KEY long press: BLE keyboard forgotten, pairing started");
+            SOLAR_OS_LOGI(TAG, "KEY long press: BLE keyboard forget and pairing requested");
         }
         if (forget_err != ESP_OK) {
             SOLAR_OS_LOGW(TAG,
@@ -1185,7 +1227,11 @@ static void dispatch_input_key(const solar_os_input_key_event_t *event)
         return;
     }
 
-    if ((event->modifiers & SOLAR_OS_INPUT_MOD_LEFT_ALT) != 0 &&
+    const bool tui_fullscreen_altgr =
+        (event->modifiers & SOLAR_OS_INPUT_MOD_RIGHT_ALT) != 0 &&
+        (event->key == SOLAR_OS_KEY_ENTER || event->key == '\r');
+    if (((event->modifiers & SOLAR_OS_INPUT_MOD_LEFT_ALT) != 0 ||
+         tui_fullscreen_altgr) &&
         event->key != SOLAR_OS_KEY_APP_EXIT) {
         const char prefix = (char)SOLAR_OS_KEY_ALT_PREFIX;
         dispatch_input_chars(&prefix, 1);
@@ -1492,6 +1538,7 @@ static void process_app_requests(void)
 static void maybe_enter_idle_sleep(void)
 {
     if (!board_has(SOLAR_OS_BOARD_CAP_KEY) ||
+        deferred_sleep_pending ||
         !solar_os_sessions_foreground_is_shell() ||
         key_pressed ||
         key_ignore_until_released) {
@@ -1701,6 +1748,7 @@ void app_main(void)
         dispatch_app_tick();
         dispatch_input_sources();
         process_app_requests();
+        maybe_enter_deferred_sleep();
         update_status();
 
         draw_terminal_if_needed();

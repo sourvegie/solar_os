@@ -1520,10 +1520,14 @@ static size_t input_read_chars_for_source(solar_os_input_source_t source,
              event.action == SOLAR_OS_INPUT_KEY_REPEAT);
         const bool emits_key = emits_input && event.key != 0;
         const bool emits_codepoint = emits_input && event.codepoint != 0;
+        const bool tui_fullscreen_altgr =
+            (event.modifiers & SOLAR_OS_INPUT_MOD_RIGHT_ALT) != 0 &&
+            (event.key == SOLAR_OS_KEY_ENTER || event.key == '\r');
         const bool emits_alt_prefix = emits_key &&
             ((((event.modifiers & SOLAR_OS_INPUT_MOD_ALT) != 0) && event.key == '\t') ||
              (((event.modifiers & SOLAR_OS_INPUT_MOD_LEFT_ALT) != 0) &&
-              event.key != SOLAR_OS_KEY_APP_EXIT));
+              event.key != SOLAR_OS_KEY_APP_EXIT) ||
+             tui_fullscreen_altgr);
         const size_t codepoint_len = emits_codepoint
             ? solar_os_input_encode_utf8(event.codepoint, NULL)
             : 0;

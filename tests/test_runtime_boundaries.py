@@ -31,8 +31,6 @@ class RuntimeBoundaryTest(unittest.TestCase):
                 "static solar_os_job_runtime_t job_runtimes",
             "src/services/solar_os_sessions.c":
                 "static solar_os_session_state_t session_state",
-            "src/services/solar_os_expansion.c":
-                "static solar_os_expansion_device_t devices",
             "src/services/solar_os_buses.c":
                 "static solar_os_bus_info_t buses",
             "src/services/solar_os_port.c":
@@ -45,6 +43,83 @@ class RuntimeBoundaryTest(unittest.TestCase):
         for relative_path, declaration in declarations.items():
             source = (ROOT / relative_path).read_text(encoding="utf-8")
             self.assertIn(declaration, source, relative_path)
+
+    def test_expansion_registry_prefers_external_memory(self):
+        source = (ROOT / "src/services/solar_os_expansion.c").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("SOLAR_OS_EXPANSION_DEVICE_MAX", source)
+        self.assertIn("solar_os_memory_calloc(", source)
+        self.assertIn("SOLAR_OS_MEMORY_EXTERNAL_PREFERRED", source)
+        self.assertIn("static StaticSemaphore_t devices_mutex_storage;", source)
+        self.assertNotIn("portENTER_CRITICAL(&devices_lock)", source)
+
+    def test_t_lora_devices_preserve_registered_resources_on_detach(self):
+        keyboard = (ROOT / "src/services/solar_os_tca8418.c").read_text(
+            encoding="utf-8"
+        )
+        radio = (ROOT / "src/services/solar_os_sx1262.c").read_text(
+            encoding="utf-8"
+        )
+
+        clear_keyboard = keyboard.split("static void clear_device", 1)[1].split(
+            "esp_err_t solar_os_tca8418_attach", 1
+        )[0]
+        self.assertIn("pwm_port_stop", clear_keyboard)
+        self.assertIn("backlight_active", clear_keyboard)
+
+        detach_radio = radio.split("esp_err_t solar_os_sx1262_detach", 1)[1]
+        self.assertIn(
+            "ESP_RETURN_ON_ERROR(solar_os_radio_unregister(name)", detach_radio
+        )
+        self.assertLess(
+            detach_radio.index("solar_os_radio_unregister(name)"),
+            detach_radio.index("clear_device(device)"),
+        )
+
+    def test_expansion_drivers_declare_categories(self):
+        descriptor_sources = []
+        for path in (ROOT / "src/services").glob("*.c"):
+            source = path.read_text(encoding="utf-8")
+            if "const solar_os_expansion_driver_t" in source:
+                descriptor_sources.append((path, source))
+        self.assertTrue(descriptor_sources)
+        for path, source in descriptor_sources:
+            descriptor_count = len(re.findall(
+                r"(?:static )?const solar_os_expansion_driver_t\s+\w+\s*=\s*\{",
+                source,
+            ))
+            if descriptor_count == 0:
+                continue
+            category_count = source.count(
+                ".category = SOLAR_OS_EXPANSION_CATEGORY_"
+            )
+            self.assertEqual(category_count, descriptor_count, path.name)
+
+    def test_expansion_driver_command_orders_explicit_categories(self):
+        shell = (ROOT / "src/shell/solar_os_shell_expansion.c").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn('"CATEGORY"', shell)
+        self.assertIn("solar_os_shell_io_printf_bold(", shell)
+        self.assertIn('"  %-*s %-5s %-6s %s\\n"', shell)
+        self.assertIn("expansion_next_driver_in_category", shell)
+        self.assertIn("strcmp(driver.name, next->name) < 0", shell)
+        self.assertIn(
+            "solar_os_expansion_category_name(category)",
+            shell,
+        )
+
+    def test_rotary_encoder_is_interrupt_driven_without_iram_handler(self):
+        rotary = (ROOT / "src/services/solar_os_rotary_encoder.c").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("GPIO_INTR_ANYEDGE", rotary)
+        self.assertEqual(rotary.count("gpio_isr_handler_add("), 2)
+        self.assertIn("xQueueSendFromISR", rotary)
+        self.assertIn("xQueueReceive", rotary)
+        self.assertNotIn("ROTARY_POLL_MS", rotary)
+        self.assertNotIn("IRAM_ATTR rotary_gpio_isr", rotary)
 
     def test_telnet_uses_an_external_listener_and_internal_shell_stack(self):
         telnetd = (ROOT / "src/jobs/solar_os_telnetd_job.c").read_text(
@@ -259,6 +334,82 @@ class RuntimeBoundaryTest(unittest.TestCase):
             ble,
         )
 
+    def test_ble_reconnect_is_scan_gated_to_the_remembered_peer(self):
+        ble = (ROOT / "src/services/solar_os_ble_keyboard.c").read_text(
+            encoding="utf-8"
+        )
+        reconnect_start = ble.index("static void reconnect_task(")
+        reconnect_end = ble.index("static void schedule_reconnect(", reconnect_start)
+        reconnect = ble[reconnect_start:reconnect_end]
+        candidate_start = ble.index("static void consider_candidate(")
+        candidate_end = ble.index(
+            "static const char *key_type_name(", candidate_start
+        )
+        candidate = ble[candidate_start:candidate_end]
+
+        self.assertIn(
+            "scan_and_open_keyboard(BLE_KEYBOARD_SCAN_RECONNECT)", reconnect
+        )
+        self.assertNotIn("open_keyboard(peer->bda", reconnect)
+        self.assertIn(
+            "active_scan_mode == BLE_KEYBOARD_SCAN_RECONNECT", candidate
+        )
+        self.assertIn("bda_matches_remembered_peer", candidate)
+        self.assertIn("BLE_KEYBOARD_RECONNECT_BACKOFF_MAX_MS", reconnect)
+
+    def test_ble_reconnect_requires_connectable_advertisement_and_stops_scan(self):
+        ble = (ROOT / "src/services/solar_os_ble_keyboard.c").read_text(
+            encoding="utf-8"
+        )
+        candidate_start = ble.index("static void consider_candidate(")
+        candidate_end = ble.index("static const char *key_type_name(", candidate_start)
+        candidate = ble[candidate_start:candidate_end]
+        callback_start = ble.index("static void gap_callback(")
+        callback_end = ble.index("static void hidh_callback(", callback_start)
+        callback = ble[callback_start:callback_end]
+        scan_start = ble.index("static esp_err_t run_keyboard_scan(")
+        scan_end = ble.index(
+            "static esp_err_t close_connected_keyboard_for_pairing(",
+            scan_start,
+        )
+        scan = ble[scan_start:scan_end]
+
+        self.assertIn(
+            "solar_os_ble_keyboard_scan_reconnect_event_is_connectable",
+            candidate,
+        )
+        self.assertIn("reconnect_scan_stop_requested", candidate)
+        self.assertIn("esp_ble_gap_stop_scanning()", candidate)
+        self.assertIn("ESP_GAP_BLE_SCAN_STOP_COMPLETE_EVT", callback)
+        self.assertIn("xSemaphoreGive(scan_stop_done_sem)", callback)
+        self.assertIn("xSemaphoreTake(scan_stop_done_sem", scan)
+        self.assertLess(
+            scan.index("xSemaphoreTake(scan_stop_done_sem"),
+            scan.rindex("active_scan_mode = BLE_KEYBOARD_SCAN_DISCOVERY;"),
+        )
+        self.assertNotIn("open_keyboard(", callback)
+
+    def test_ble_reconnect_preserves_matched_candidate_until_open(self):
+        ble = (ROOT / "src/services/solar_os_ble_keyboard.c").read_text(
+            encoding="utf-8"
+        )
+        candidate_start = ble.index("static void consider_candidate(")
+        candidate_end = ble.index("static const char *key_type_name(", candidate_start)
+        candidate = ble[candidate_start:candidate_end]
+        open_start = ble.index("static esp_err_t scan_and_open_keyboard(")
+        open_end = ble.index("static void scan_task(", open_start)
+        open_path = ble[open_start:open_end]
+
+        self.assertLess(
+            candidate.index("if (candidate_frozen)"),
+            candidate.index("bda_matches_remembered_peer"),
+        )
+        self.assertIn("candidate_frozen = true;", candidate)
+        self.assertIn("ble_keyboard_candidate_t selected_candidate = {0};", open_path)
+        self.assertIn("run_keyboard_scan(mode, &selected_candidate)", open_path)
+        self.assertIn("open_keyboard(selected_candidate.bda", open_path)
+        self.assertNotIn("open_keyboard(candidate.bda", open_path)
+
     def test_audio_stream_direction_and_shell_capabilities(self):
         audio = (ROOT / "src/services/solar_os_audio.c").read_text(
             encoding="utf-8"
@@ -361,6 +512,31 @@ class RuntimeBoundaryTest(unittest.TestCase):
         self.assertIn("if (lines->frame->clear_background)", tft)
         self.assertIn("display->config.width - 1U", tft)
         self.assertIn("display->config.height - 1U", tft)
+
+    def test_display_targets_use_u8g2_logical_geometry(self):
+        display = (ROOT / "src/services/solar_os_display.c").read_text(
+            encoding="utf-8"
+        )
+        board_display = (
+            ROOT / "src/board/solar_os_board_display_expansion.c"
+        ).read_text(encoding="utf-8")
+        tft = (ROOT / "src/services/solar_os_tft_display.c").read_text(
+            encoding="utf-8"
+        )
+
+        for source in (display, board_display):
+            self.assertIn(
+                "width != u8g2_GetDisplayWidth", source
+            )
+            self.assertIn(
+                "height != u8g2_GetDisplayHeight", source
+            )
+        registered_geometry = tft.split(
+            "device->display = (solar_os_board_display_t)", 1
+        )[1].split(".surface_formats", 1)[0]
+        self.assertIn(".width = u8g2_GetDisplayWidth(u8g2)", registered_geometry)
+        self.assertIn(".height = u8g2_GetDisplayHeight(u8g2)", registered_geometry)
+        self.assertNotIn("SOLAR_OS_BOARD_DISPLAY_NATIVE_WIDTH", registered_geometry)
 
     def test_foreground_apps_use_one_class_lifecycle(self):
         sources = list((ROOT / "src/apps").glob("*.c"))

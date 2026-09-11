@@ -2,6 +2,22 @@
 
 ## 4.x
 
+- **4.10.23** — 2026-09-11 — Added the configurable native graphical
+  launcher. Launcher configurations now use readable Open Iconic names while
+  retaining legacy numeric IDs, and Python/Lua graphics scripts can draw the
+  same named icons at supported sizes.
+- **4.10.22** — 2026-09-08 — The Wi-Fi TUI now presents a scanning popup,
+  selectable networks, visible password entry, and management views for
+  forgetting saved stations and adding, editing, or removing saved access
+  points. Startup reconnects only to the most recently used saved station,
+  avoiding a blocking scan across every remembered network. `expansion` now
+  opens a device manager for browsing attached devices and categorized drivers,
+  inspecting details, and attaching or detaching devices while `io` retains bus
+  ownership. Shared TUIs automatically reclaim status and help rows on short
+  displays and support transient full-screen toggling with `Alt+Enter`,
+  AltGr+Enter, or CL-32 `File+OK`. OTA progress output is constrained to the
+  terminal width so unit suffixes no longer wrap and redraw the progress bar on
+  another row.
 - **4.10.18** — 2026-09-04 — `help update` now reads catalog keyword metadata
   in its published string form and accepts signed manuals that omit
   package-gated topics from the active runtime index, fixing verification

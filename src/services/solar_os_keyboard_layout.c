@@ -107,6 +107,7 @@ static uint32_t keyboard_usage_to_de(uint16_t usage,
     const bool altgr = (modifiers & SOLAR_OS_INPUT_MOD_RIGHT_ALT) != 0;
     if (altgr) {
         switch (usage) {
+        case 0x28: return SOLAR_OS_KEY_ENTER;
         case 0x2b: return '\t';
         case 0x14: return '@';
         case 0x24: return '{';

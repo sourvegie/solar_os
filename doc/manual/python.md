@@ -865,7 +865,7 @@ The expansion API mirrors the `expansion` shell lifecycle when the expansion
 service is compiled.
 
 - `drivers()`: return compiled driver dictionaries with `name`, `summary`,
-  `required_capabilities`, `probe_supported`, and `supported`.
+  `category`, `required_capabilities`, `probe_supported`, and `supported`.
 - `devices()`: return active device dictionaries with `name`, `driver`,
   `origin` (`board` or `runtime`), `ready`, `autostart`, `detachable`, and
   `bindings`. Each normalized binding contains `kind`, `role`, `target`,
@@ -1513,6 +1513,8 @@ Functions:
 - `fill_rect(x, y, width, height)`: draw a filled rectangle.
 - `circle(x, y, radius)`: draw a circle outline.
 - `fill_circle(x, y, radius)`: draw a filled circle.
+- `icon(x, y, name, size)`: draw a named Open Iconic symbol; use a lowercase,
+  hyphenated name such as `tablet`; size is `8`, `16`, `32`, `48`, or `64`.
 - `bitmap(x, y, width, height, data)`: draw a transparent packed 1-bit XBM.
 - `sprite(x, y, width, height, data)`: alias for `bitmap()`.
 - `text(x, baseline_y, text)`: draw UTF-8 text.
