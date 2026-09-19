@@ -1,6 +1,6 @@
 [flavor]
-name = "custom"
-description = "Custom SolarOS flavor created with os_builder."
+name = "vga32"
+description = "SolarOS graphics build for TTGO VGA32 boards."
 
 [groups]
 hardware_shell = true

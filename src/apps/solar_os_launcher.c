@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 
 #include "solar_os_app_registry.h"
+#include "solar_os_config.h"
 #include "solar_os_gfx.h"
 #include "solar_os_json.h"
 #include "solar_os_keys.h"
@@ -63,9 +64,21 @@ static const char launcher_default_config[] =
     "    {\"name\": \"Files\", \"icon\": \"folder\", \"command\": \"files\", \"column\": 0, \"row\": 0},\n"
     "    {\"name\": \"Manual\", \"icon\": \"book\", \"command\": \"help\", \"column\": 1, \"row\": 0},\n"
     "    {\"name\": \"Wi-Fi\", \"icon\": \"wifi\", \"command\": \"wifi\", \"column\": 2, \"row\": 0},\n"
+#if SOLAR_OS_PACKAGE_APP_CLOCK
     "    {\"name\": \"Clock\", \"icon\": \"clock\", \"command\": \"clock\", \"column\": 0, \"row\": 1},\n"
+#else
+    "    {\"name\": \"Serial\", \"icon\": \"terminal\", \"command\": \"com\", \"column\": 0, \"row\": 1},\n"
+#endif
+#if SOLAR_OS_PACKAGE_APP_CALC
     "    {\"name\": \"Calculator\", \"icon\": \"calculator\", \"command\": \"calc\", \"column\": 1, \"row\": 1},\n"
+#else
+    "    {\"name\": \"I/O\", \"icon\": \"cog\", \"command\": \"io\", \"column\": 1, \"row\": 1},\n"
+#endif
+#if SOLAR_OS_PACKAGE_APP_WRITER
     "    {\"name\": \"Writer\", \"icon\": \"pencil\", \"command\": \"writer\", \"column\": 2, \"row\": 1}\n"
+#else
+    "    {\"name\": \"Editor\", \"icon\": \"pencil\", \"command\": \"edit\", \"column\": 2, \"row\": 1}\n"
+#endif
     "  ]\n"
     "}\n";
 

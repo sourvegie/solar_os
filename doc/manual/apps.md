@@ -688,6 +688,9 @@ Without an argument, Launcher reads `launcher.json` from the active storage root
 The first run creates a usable default file there. A supplied path selects another
 configuration. Launcher reloads the file whenever a child application returns,
 so editing the configuration through a launcher item takes effect immediately.
+The generated default uses Clock, Calculator, and Writer when those packages are
+compiled; smaller flavors substitute Serial, I/O, and Editor so every default
+item remains launchable.
 
 The file is JSON. `layout.columns` and `layout.rows` define a grid from 1 by 1
 through 8 by 8. Each item has a displayed `name`, an Open Iconic `icon`
@@ -1397,7 +1400,8 @@ Controls:
 
 ## synth
 
-Open the native synthesizer and sound designer:
+Native polyphonic synthesizer and sound designer with graphical, compact-display,
+and headless modes.
 
 ```text
 synth [--headless]

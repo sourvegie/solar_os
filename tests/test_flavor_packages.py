@@ -38,6 +38,11 @@ class FlavorPackagesTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid flavor name"):
             generate_flavor_config.public_flavor_name("full", "beta flavor")
 
+    def test_builtin_flavor_names_match_their_files(self):
+        for flavor in ("core", "full", "netrunner", "rover", "vga32", "writerdeck"):
+            with self.subTest(flavor=flavor):
+                self.assertEqual(self.resolve(flavor)[0], flavor)
+
     def test_games_are_only_in_full(self):
         built_in_flavors = ("core", "full", "netrunner", "rover", "writerdeck")
         for flavor in built_in_flavors:

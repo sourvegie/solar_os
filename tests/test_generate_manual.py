@@ -46,6 +46,14 @@ class ManualReleaseLimitTest(unittest.TestCase):
 
         generate_manual.validate_release_pages(pages)
 
+    def test_checked_in_github_index_matches_manual_sources(self):
+        pages = generate_manual.load_pages(
+            REPOSITORY / "doc/manual",
+            REPOSITORY / "packages/solar_os_packages.toml",
+        )
+        actual = (REPOSITORY / "doc/manual/README.md").read_text(encoding="utf-8")
+        self.assertEqual(actual, generate_manual.render_github_index(pages))
+
     def test_command_names_resolve_to_command_pages(self):
         pages = generate_manual.load_pages(
             REPOSITORY / "doc/manual",

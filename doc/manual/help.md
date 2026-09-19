@@ -65,6 +65,9 @@ manual is therefore activated only when its catalog names the exact running
 firmware version. A previously verified manual remains available after an OS
 upgrade instead of silently falling back to embedded content, but SolarOS marks
 it as potentially outdated until it is refreshed or reset.
+The comparison includes release suffixes: firmware `4.10.23-stardust.1` requires
+a catalog published for exactly `4.10.23-stardust.1`; an upstream `4.10.23`
+catalog is intentionally rejected.
 
 ## Quick reference
 

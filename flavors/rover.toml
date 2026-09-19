@@ -1,6 +1,6 @@
 [flavor]
-name = "custom"
-description = "Custom SolarOS flavor created with os_builder."
+name = "rover"
+description = "SolarOS expansion-capable build for ESP32 WROVER boards."
 
 [groups]
 hardware_shell = true
@@ -54,7 +54,6 @@ gateway_sync = true
 espnow = true
 radio_link = true
 meshcore = true
-audio_commands = true
 reader = true
 writer = true
 notes = true
